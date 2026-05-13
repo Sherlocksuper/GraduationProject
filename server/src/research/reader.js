@@ -47,21 +47,35 @@ function clipText(text, maxChars = 2800) {
 }
 
 import { chatWithRetry } from "./llmChat.js";
+import { compactLlmMessages } from "./llmTraceMessages.js";
 
-export async function readEvidence({ llmClient, topic, subquestion, docs, trace }) {
+export async function readEvidence({
+  llmClient,
+  topic,
+  subquestion,
+  docs,
+  trace,
+  maxTokens = 900,
+  maxSources = 3,
+  clipChars = 2400
+} = {}) {
   if (!llmClient) throw new Error("llm_not_configured");
   const sq = subquestion || {};
   const qid = String(sq.id || "").trim() || "q?";
   const question = String(sq.question || "").trim();
 
+  const srcCap = Math.max(2, Math.min(8, Math.floor(Number(maxSources) || 3)));
+  const clipCap = Math.max(600, Math.min(8000, Math.floor(Number(clipChars) || 2400)));
+  const tokCap = Math.max(400, Math.min(2000, Math.floor(Number(maxTokens) || 900)));
+
   const sources = (Array.isArray(docs) ? docs : [])
     .filter((d) => d && typeof d.url === "string" && d.url.startsWith("http"))
-    .slice(0, 3)
+    .slice(0, srcCap)
     .map((d, idx) => ({
       idx: idx + 1,
       url: d.url,
       title: d.title || "",
-      text: clipText(d.text, 2400)
+      text: clipText(d.text, clipCap)
     }));
 
   const prompt = [
@@ -100,13 +114,18 @@ export async function readEvidence({ llmClient, topic, subquestion, docs, trace 
       type: "action",
       stage: "reading",
       agent: "Reader",
-      payload: { subquestionId: qid, attempt: i + 1, sourceCount: sources.length }
+      payload: {
+        subquestionId: qid,
+        attempt: i + 1,
+        sourceCount: sources.length,
+        llmMessages: compactLlmMessages(messages)
+      }
     });
     const raw = await chatWithRetry({
       llmClient,
       messages,
       temperature: 0.2,
-      maxTokens: 900,
+      maxTokens: tokCap,
       retries: 4,
       trace,
       stage: "reading",

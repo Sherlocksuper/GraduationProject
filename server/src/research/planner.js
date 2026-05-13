@@ -41,8 +41,9 @@ function extractFirstJsonObject(text) {
 }
 
 import { chatWithRetry } from "./llmChat.js";
+import { compactLlmMessages } from "./llmTraceMessages.js";
 
-export async function planTopic({ llmClient, topic, trace }) {
+export async function planTopic({ llmClient, topic, trace, maxTokens = 1200, temperature = 0.2 } = {}) {
   if (!llmClient) {
     throw new Error(
       "LLM is not configured. Set LLM_PROVIDER=kimi|moonshot and provide KIMI_API_KEY (or MOONSHOT_API_KEY)."
@@ -65,7 +66,11 @@ export async function planTopic({ llmClient, topic, trace }) {
   "acceptance": ["string"]
 }`,
     "约束：",
-    "- subquestions 数量必须为 6 个，覆盖：背景/现状/案例/争议/趋势/风险。",
+    "- subquestions 数量由主题复杂度决定，**必须为 1～5 个**：单一事实、单点定义、用户已把问题收得很窄时，**只输出 1 个子问题**，不要硬拆成多条；主题面广、证据明显需要多侧面时再增加到 3～5。**禁止**语义重复的两个子问题（例如仅多一个「的」或标点差异的同义提问）。",
+    "- **禁止**「整体与局部」式硬拆：例如一节问「X 的成立时间与代号」、另一节只问「X 的代号」——后者信息已被前者包含，应合并为**一条**子问题；同理「A 与 B」与单独「B」不要拆成两问。",
+    "- 子问题要**互不重复、角度不同**，且**紧扣用户给出的主题本身**（可写定义、关键事实、不同侧面、对比、数据、人物/机构特色、评价与争议等），由你根据主题**自行设计**最合适的切分方式。",
+    "- **禁止**机械套用固定套路：不要按「历史背景 → 现状 → 成就 → 挑战/对策」这种千篇一律的申论结构来凑问题；除非主题确实明显需要其中某一类，才可自然出现，且措辞要具体，不要空洞套话标题。",
+    "- 若主题是人物/学校/公司，可写生平节点、学科与科研、招生与校区、社会舆论等**与主题强相关**的具体问题，而不是四个泛化的「背景/现状」。",
     "- 每个 keywords 只给 3 个，尽量短；如适用，至少包含 1 个英文关键词。",
     "- acceptance 只给 2 条，且每条不超过 18 个汉字。",
     "- priority 1 为最高优先级。",
@@ -88,11 +93,17 @@ export async function planTopic({ llmClient, topic, trace }) {
       }
     ];
 
+    trace?.({
+      type: "action",
+      stage: "planning",
+      agent: "Planner",
+      payload: { attempt: i + 1, llmMessages: compactLlmMessages(messages) }
+    });
     const raw = await chatWithRetry({
       llmClient,
       messages,
-      temperature: 0.2,
-      maxTokens: 1200,
+      temperature,
+      maxTokens,
       retries: 4,
       trace,
       stage: "planning",
@@ -109,7 +120,8 @@ export async function planTopic({ llmClient, topic, trace }) {
     const jsonText = extractFirstJsonObject(raw) || raw;
     const parsed = safeJsonParse(jsonText);
     if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") continue;
-    if (!Array.isArray(parsed.value.subquestions) || parsed.value.subquestions.length === 0) continue;
+    const sqs = parsed.value.subquestions;
+    if (!Array.isArray(sqs) || sqs.length < 1 || sqs.length > 5) continue;
     return parsed.value;
   }
   throw new Error("planner_json_parse_failed");

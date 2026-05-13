@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": process.env.VITE_API_TARGET || "http://localhost:3002"
+      "/api": process.env.VITE_API_TARGET || "http://localhost:3001"
     }
   }
 });

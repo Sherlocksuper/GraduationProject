@@ -40,7 +40,7 @@ function extractFirstJsonObject(text) {
   return null;
 }
 
-export async function writeSection({ llmClient, topic, subquestion, trace }) {
+export async function writeSection({ llmClient, topic, subquestion, trace, maxTokens = 560 } = {}) {
   if (!llmClient) throw new Error("llm_not_configured");
   const sq = subquestion || {};
   const qid = String(sq.id || "").trim() || "q?";
@@ -57,7 +57,9 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
 
   const prompt = [
     "你是研究写作助手（Writer）。你将基于给定主题与一个子问题，写出该小节内容。",
-    "重要：你必须优先使用“证据要点”来写作，并在输出中给出来源 URL。",
+    "重要：你必须优先使用「证据要点」来写作；正文以叙述为主，不要在段落里机械堆砌网址或「参考链接」式套话。",
+    "语气：写给普通读者看的说明文字，像把检索结果讲清楚，不要写成公文、不要列「目录」「本章结构」、不要用「一、二、三」式大纲腔。",
+    "小节标题 heading：必须直接概括**本子问题**在问什么，用自然短语即可；**禁止**高频申论式标题，例如「……的历史背景」「……的现状」「……的挑战与对策」「……的发展现状」等空洞套话，除非证据要点里确实主要在谈该侧面且用更具体的说法更合适。",
     "输出必须是严格 JSON，且只包含字段：",
     `{
   "heading": "string",
@@ -66,11 +68,12 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
   "sources": ["https://..."]
 }`,
     "约束：",
-    "- heading 简短，不要超过 18 个汉字。",
-    "- summary 建议 4-7 条，每条不超过 30 个汉字。",
-    "- paragraphs 建议 4-7 段，每段尽量 180-360 汉字（不强制固定字数/段数），写得更“报告化”，避免口号。",
-    "- 段落要包含：现状/原因/影响/案例或机制/风险与对策（按子问题取舍）。",
-    "- sources 至少 2 条 URL，必须来自证据要点里出现过的 URL。",
+    "- heading 简短自然，不要超过 18 个汉字，不要用编号前缀；各小节标题风格要有区分，避免读起来像同一模板换词。",
+    "- **禁止**与「仅多/少一个『的』、或仅标点差异」的同义标题；若证据高度重叠，宁可把信息写进同一段，不要拆成两个雷同标题。",
+    "- summary 2-4 条即可，每条一句、尽量短（约 15-40 字），不要写成提纲编号。",
+    "- paragraphs 2-4 段即可，宁短勿滥：每段约 80-200 字，只写与子问题最相关的信息，不必面面俱到。",
+    "- 不要为凑段数重复观点；段落之间衔接自然，避免套话。",
+    "- sources 至少 2 条 URL，必须来自证据要点里出现过的 URL（写入 JSON 供系统校验用；合并成报告时不会逐段展示）。",
     "- 不要输出 Markdown，不要输出多余解释。",
     "",
     `主题：${topic}`,
@@ -82,12 +85,13 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
   ].join("\n");
 
   const messages = [
-    { role: "system", content: "你是严谨写作智能体，只输出 JSON。" },
+    { role: "system", content: "你是写作智能体，只输出 JSON；内容要简洁口语，禁止灌水拉长。" },
     { role: "user", content: prompt }
   ];
 
   // lazy import to avoid circular deps surprises
   const { chatWithRetry } = await import("./llmChat.js");
+  const { compactLlmMessages } = await import("./llmTraceMessages.js");
 
   const attempts = 3;
   for (let i = 0; i < attempts; i++) {
@@ -95,13 +99,13 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
       type: "action",
       stage: "writing",
       agent: "Writer",
-      payload: { subquestionId: qid, attempt: i + 1 }
+      payload: { subquestionId: qid, attempt: i + 1, llmMessages: compactLlmMessages(messages) }
     });
     const raw = await chatWithRetry({
       llmClient,
       messages,
       temperature: 0.2,
-      maxTokens: 900,
+      maxTokens,
       retries: 4,
       trace,
       stage: "writing",
@@ -121,8 +125,8 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
 
     const v = parsed.value;
     if (typeof v.heading !== "string" || !v.heading.trim()) continue;
-    if (!Array.isArray(v.summary) || v.summary.length < 3) continue;
-    if (!Array.isArray(v.paragraphs) || v.paragraphs.length < 3) continue;
+    if (!Array.isArray(v.summary) || v.summary.length < 2) continue;
+    if (!Array.isArray(v.paragraphs) || v.paragraphs.length < 2) continue;
     if (!Array.isArray(v.sources)) continue;
     const sources = v.sources
       .map((x) => String(x || "").trim())
@@ -134,12 +138,20 @@ export async function writeSection({ llmClient, topic, subquestion, trace }) {
     if (!finalSources.length) continue;
     return {
       heading: String(v.heading).trim(),
-      summary: v.summary.map((s) => String(s || "").trim()).filter(Boolean).slice(0, 8),
-      paragraphs: v.paragraphs.map((p) => String(p || "").trim()).filter(Boolean).slice(0, 10),
+      summary: v.summary.map((s) => String(s || "").trim()).filter(Boolean).slice(0, 5),
+      paragraphs: v.paragraphs.map((p) => String(p || "").trim()).filter(Boolean).slice(0, 5),
       sources: finalSources
     };
   }
   throw new Error(`writer_json_parse_failed:${qid}`);
+}
+
+/** 拼进正文前去掉句末标点，避免「。。」「。；」叠用 */
+function stripTrailingCnPunct(s) {
+  return String(s || "")
+    .trim()
+    .replace(/[。；、，,]+$/u, "")
+    .trim();
 }
 
 export function renderReportMarkdown({ topic, plan, sections, overview, conclusion }) {
@@ -147,46 +159,37 @@ export function renderReportMarkdown({ topic, plan, sections, overview, conclusi
   const lines = [
     `# ${title}`,
     "",
-    "> 说明：本报告为中期 MVP 自动生成初稿（evidence-based）。当前版本已进行**联网搜索与网页抓取**并在各节末尾给出来源链接；但仍未做严格的多源交叉验证与事实级校验，建议将关键结论进一步核验后再用于正式场景。",
+    "下面是根据检索材料整理的说明，分成少量段落展开；表述力求直白，不必逐段罗列网址。",
     ""
   ];
 
   if (typeof overview === "string" && overview.trim()) {
-    lines.push("## 摘要", "", overview.trim(), "");
+    lines.push(overview.trim(), "");
   }
 
-  lines.push("## 目录", "");
-  const toc = (sections || []).map((s, idx) => `- ${idx + 1}. ${s.heading}`);
-  lines.push(...toc, "", "## 正文", "");
-
-  for (const [idx, s] of (sections || []).entries()) {
-    lines.push(`### ${idx + 1}. ${s.heading}`, "");
+  for (const s of sections || []) {
+    const h = String(s.heading || "").trim();
+    // 不用 ## 级标题，避免整篇像「目录式」多枚大标题；用正文级加粗作小节提示即可
+    if (h) lines.push(`**${h}**`, "");
     if (Array.isArray(s.summary) && s.summary.length) {
-      lines.push("要点：");
-      for (const b of s.summary) lines.push(`- ${b}`);
-      lines.push("");
+      const parts = s.summary.map((b) => stripTrailingCnPunct(b)).filter(Boolean);
+      if (parts.length) {
+        const body = parts.join(" ").replace(/\s+/g, " ").trim();
+        const endOk = /[。！？…」』]$/.test(body);
+        lines.push(endOk ? body : `${body}。`, "");
+      }
     }
     for (const p of Array.isArray(s.paragraphs) ? s.paragraphs : []) {
-      lines.push(p, "");
-    }
-    if (Array.isArray(s.sources) && s.sources.length) {
-      lines.push("来源：");
-      for (const u of s.sources) lines.push(`- ${u}`);
-      lines.push("");
+      const t = String(p || "").trim();
+      if (t) lines.push(t, "");
     }
   }
 
   if (typeof conclusion === "string" && conclusion.trim()) {
-    lines.push("## 结论", "", conclusion.trim(), "");
+    lines.push("---", "", conclusion.trim(), "");
   }
 
-  lines.push("## 局限性与下一步", "");
-  lines.push(
-    "- 本版本已具备联网检索与抓取：后续将加入“多源交叉验证”和更强的信源质量评估（白名单/黑名单/域名权重）。",
-    "- 将加入 Critic：自动检查“无证据断言”、冲突观点与一致性，并驱动修订。",
-    "- 将加入评测：引用覆盖率、来源多样性、端到端耗时等指标。",
-    ""
-  );
+  lines.push("", "*以上内容由模型根据检索材料生成，可能存在疏漏，重要事实请自行核对原始材料。*");
 
   return lines.join("\n");
 }

@@ -28,11 +28,49 @@ async function writeJsonFile(filePath, obj) {
   await fs.writeFile(filePath, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
 }
 
-async function requestChat({ baseUrl, sessionId, question, debug }) {
-  const url = `${baseUrl.replace(/\/+$/, "")}/api/chat${debug ? "?debug=1" : ""}`;
+async function loginJwt({ baseUrl, username, password }) {
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/auth/login`;
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`login failed: ${resp.status} ${data?.error || JSON.stringify(data)}`);
+  }
+  const token = data?.token;
+  if (!token || typeof token !== "string") {
+    throw new Error("login ok but no token in JSON body");
+  }
+  return token;
+}
+
+async function createChatSession({ baseUrl, bearer }) {
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/chats`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bearer}` }
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`create chat failed: ${resp.status} ${data?.error || JSON.stringify(data)}`);
+  }
+  const id = data?.chat?.id;
+  if (!id) throw new Error("create chat: missing chat.id");
+  return id;
+}
+
+async function requestChat({ baseUrl, sessionId, question, debug, bearer }) {
+  const q = new URLSearchParams();
+  q.set("sync", "1");
+  if (debug) q.set("debug", "1");
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/chat?${q.toString()}`;
+  const headers = { "Content-Type": "application/json" };
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
     body: JSON.stringify({ sessionId, question })
   });
   const text = await resp.text();
@@ -46,7 +84,10 @@ async function requestChat({ baseUrl, sessionId, question, debug }) {
 }
 
 const baseUrl = readArg("baseUrl") || process.env.SMOKE_BASE_URL || "http://localhost:3001";
-const sessionId = readArg("sessionId") || process.env.SMOKE_SESSION_ID || "smoke";
+const chatIdArg =
+  readArg("chatId") || process.env.SMOKE_CHAT_ID || readArg("sessionId") || process.env.SMOKE_SESSION_ID || "";
+const smokeUser = process.env.SMOKE_USER || "";
+const smokePass = process.env.SMOKE_PASS || "";
 const debug = (readArg("debug") || process.env.SMOKE_DEBUG || "1") !== "0";
 const question =
   readArg("question") ||
@@ -61,13 +102,13 @@ const logPath = (() => {
   if (direct) return direct;
   const now = new Date();
   const ts = formatTsForFile(now);
-  const sid = safeFilePart(sessionId || "smoke");
+  const sid = safeFilePart(chatIdArg || "smoke");
   return path.join(logDir, `smoke-${ts}-${sid}.json`);
 })();
 
 const record = {
   ts: new Date().toISOString(),
-  sessionId,
+  chatId: chatIdArg,
   question,
   debug,
   ok: false,
@@ -75,14 +116,24 @@ const record = {
 };
 
 try {
-  const result = await requestChat({ baseUrl, sessionId, question, debug });
+  let bearer = "";
+  if (smokeUser && smokePass) {
+    bearer = await loginJwt({ baseUrl, username: smokeUser, password: smokePass });
+  } else {
+    throw new Error("Set SMOKE_USER and SMOKE_PASS (account must exist; register once in the web UI).");
+  }
+  const sessionId = chatIdArg || (await createChatSession({ baseUrl, bearer }));
+  record.chatId = sessionId;
+  const result = await requestChat({ baseUrl, sessionId, question, debug, bearer });
   record.ok = result.ok;
   record.status = result.status;
   record.answer = result.data?.answer;
   if (debug) {
+    record.mode = result.data?.mode;
+    record.taskId = result.data?.taskId;
+    record.trace = result.data?.trace;
     record.plan = result.data?.plan;
     record.observations = result.data?.observations;
-    record.trace = result.data?.trace;
   }
   await writeJsonFile(logPath, record);
   process.stdout.write(`${result.ok ? "OK" : "FAIL"} ${result.status}\n${logPath}\n`);
