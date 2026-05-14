@@ -957,7 +957,11 @@ app.post("/api/chat", requireLogin, async (req, res) => {
       readerMaxSources: req.body?.readerMaxSources,
       readerClipChars: req.body?.readerClipChars,
       fetcherPreferKbOnly: req.body?.fetcherPreferKbOnly,
-      criticRewriteMaxTokens: req.body?.criticRewriteMaxTokens
+      criticRewriteMaxTokens: req.body?.criticRewriteMaxTokens,
+      readerJsonAttempts: req.body?.readerJsonAttempts,
+      readerLlmRetries: req.body?.readerLlmRetries,
+      writerJsonAttempts: req.body?.writerJsonAttempts,
+      writerLlmRetries: req.body?.writerLlmRetries
     });
     const needsResearch = await shouldUseDeepResearch(question, history, chatRouteMode);
 

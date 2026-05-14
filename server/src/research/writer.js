@@ -1,3 +1,7 @@
+import { displayTopicForReport, topicAndSubquestionLinesForAgent } from "./topicSubquestionLines.js";
+
+export { displayTopicForReport };
+
 function safeJsonParse(text) {
   try {
     return { ok: true, value: JSON.parse(text) };
@@ -40,7 +44,15 @@ function extractFirstJsonObject(text) {
   return null;
 }
 
-export async function writeSection({ llmClient, topic, subquestion, trace, maxTokens = 560 } = {}) {
+export async function writeSection({
+  llmClient,
+  topic,
+  subquestion,
+  trace,
+  maxTokens = 560,
+  jsonAttempts,
+  llmRetries
+} = {}) {
   if (!llmClient) throw new Error("llm_not_configured");
   const sq = subquestion || {};
   const qid = String(sq.id || "").trim() || "q?";
@@ -76,8 +88,7 @@ export async function writeSection({ llmClient, topic, subquestion, trace, maxTo
     "- sources 至少 2 条 URL，必须来自证据要点里出现过的 URL（写入 JSON 供系统校验用；合并成报告时不会逐段展示）。",
     "- 不要输出 Markdown，不要输出多余解释。",
     "",
-    `主题：${topic}`,
-    `子问题(${qid})：${question}`,
+    ...topicAndSubquestionLinesForAgent(topic, qid, question),
     `关键词：${keywords.join(" / ")}`,
     "",
     "证据要点（每条含 claim/support/url）：",
@@ -93,7 +104,8 @@ export async function writeSection({ llmClient, topic, subquestion, trace, maxTo
   const { chatWithRetry } = await import("./llmChat.js");
   const { compactLlmMessages } = await import("./llmTraceMessages.js");
 
-  const attempts = 3;
+  const attempts = Number.isFinite(jsonAttempts) ? Math.max(1, Math.min(5, Math.floor(jsonAttempts))) : 3;
+  const chatRetries = Number.isFinite(llmRetries) ? Math.max(1, Math.min(8, Math.floor(llmRetries))) : 4;
   for (let i = 0; i < attempts; i++) {
     trace?.({
       type: "action",
@@ -106,7 +118,7 @@ export async function writeSection({ llmClient, topic, subquestion, trace, maxTo
       messages,
       temperature: 0.2,
       maxTokens,
-      retries: 4,
+      retries: chatRetries,
       trace,
       stage: "writing",
       agent: "Writer",
@@ -155,13 +167,9 @@ function stripTrailingCnPunct(s) {
 }
 
 export function renderReportMarkdown({ topic, plan, sections, overview, conclusion }) {
-  const title = plan?.title || topic;
-  const lines = [
-    `# ${title}`,
-    "",
-    "下面是根据检索材料整理的说明，分成少量段落展开；表述力求直白，不必逐段罗列网址。",
-    ""
-  ];
+  const planTitle = plan?.title != null ? String(plan.title).trim() : "";
+  const title = (planTitle || displayTopicForReport(topic)).trim() || "研究报告";
+  const lines = [`# ${title}`, ""];
 
   if (typeof overview === "string" && overview.trim()) {
     lines.push(overview.trim(), "");

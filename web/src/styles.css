@@ -2809,6 +2809,68 @@ a.tab {
   font-size: 13px;
 }
 
+.pipelineModal__hint--tight {
+  margin-top: 4px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.pipelineModal__legend {
+  margin: 0 0 12px;
+  padding: 10px 12px 10px 28px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.pipelineModal__legend li {
+  margin-bottom: 4px;
+}
+
+.pipelineModal__legend--verbose {
+  padding-left: 22px;
+}
+
+.pipelineModal__legend--verbose li {
+  margin-bottom: 8px;
+  line-height: 1.55;
+}
+
+.pipelineModal__legend--verbose li strong {
+  color: var(--text);
+  font-weight: 750;
+}
+
+.pipelineModal__legend--verbose li:last-child {
+  margin-bottom: 0;
+}
+
+.pipelineModal__legendTag {
+  display: inline-block;
+  min-width: 3.2em;
+  margin-right: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 750;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  vertical-align: middle;
+}
+
+.pipelineModal__legendTag--pill {
+  border-radius: 999px;
+  background: #eef2ff;
+  border-color: #c7d2fe;
+}
+
 .pipelineModal__err {
   color: #b91c1c;
 }
@@ -2820,6 +2882,17 @@ a.tab {
   border-radius: 12px;
   border: 1px solid var(--border);
   background: #fafafa;
+}
+
+.pipelineModal__mermaidWrap svg .nodeLabel,
+.pipelineModal__mermaidWrap svg .edgeLabel {
+  font-size: 12.5px !important;
+  font-weight: 650;
+}
+
+.pipelineModal__mermaidWrap svg .cluster text {
+  font-size: 12px !important;
+  font-weight: 700;
 }
 
 .pipelineNodeTooltip {
@@ -2851,13 +2924,135 @@ a.tab {
   font-weight: 750;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--muted);
+  color: #f8fafc;
   margin-top: 6px;
   margin-bottom: 2px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #475569;
+  display: inline-block;
 }
 
 .pipelineNodeTooltip__k:first-of-type {
   margin-top: 0;
+}
+
+.pipelineNodeTooltip__v--rich {
+  margin-top: 0;
+}
+
+.pipelineTipRich {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pipelineTipBanner {
+  font-size: 11.5px;
+  font-weight: 750;
+  color: #1e3a5f;
+  background: linear-gradient(115deg, #e0e7ff 0%, #dbeafe 55%, #e0f2fe 100%);
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  padding: 7px 10px;
+  line-height: 1.45;
+}
+
+.pipelineTipDetails {
+  border-radius: 10px;
+  border: 1px solid #93c5fd;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  overflow: hidden;
+}
+
+.pipelineTipDetails > summary.pipelineTipBanner {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 0;
+  border: none;
+  user-select: none;
+}
+
+.pipelineTipDetails > summary.pipelineTipBanner::-webkit-details-marker {
+  display: none;
+}
+
+.pipelineTipDetails > summary.pipelineTipBanner::after {
+  content: " ▸";
+  font-weight: 800;
+  opacity: 0.55;
+  margin-left: 6px;
+}
+
+.pipelineTipDetails[open] > summary.pipelineTipBanner::after {
+  content: " ▾";
+}
+
+.pipelineTipSectionBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #cbd5e1;
+  background: #f8fafc;
+}
+
+.pipelineTipSectionEmpty {
+  font-size: 11px;
+  color: #64748b;
+  padding: 4px 2px;
+}
+
+.pipelineTipRoleWrap {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #1e293b;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+}
+
+.pipelineTipRoleBar {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  background: #334155;
+  border-bottom: 1px solid #1e293b;
+}
+
+.pipelineTipRolePill {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f8fafc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.pipelineTipRoleBody {
+  margin: 0;
+  padding: 10px 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.52;
+  color: #e2e8f0;
+  background: #0f172a;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(42vh, 360px);
+  overflow: auto;
+}
+
+.pipelineTipPlain {
+  margin: 0;
+  padding: 9px 10px;
+  font-size: 11.5px;
+  line-height: 1.52;
+  color: var(--text);
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(36vh, 280px);
+  overflow: auto;
 }
 
 .pipelineNodeTooltip__v {

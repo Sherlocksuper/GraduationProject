@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Modal from "../rag/Modal.jsx";
 import { apiErrorMessage, apiFetch, clearSessionIfUnauthorized } from "../client.js";
@@ -8,7 +8,7 @@ function layoutPipelineTooltip(tip) {
   const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
   const vh = typeof window !== "undefined" ? window.innerHeight : 800;
   const pad = 12;
-  const maxW = Math.min(560, Math.max(240, vw - 2 * pad));
+  const maxW = Math.min(640, Math.max(260, vw - 2 * pad));
   let maxH = Math.min(560, Math.floor(vh * 0.72));
   let left = tip.x + 14;
   left = Math.max(pad, Math.min(left, vw - maxW - pad));
@@ -31,6 +31,134 @@ function logicalIdFromMermaidSvgGroupId(svgId, hintKeys) {
   const s = String(svgId || "");
   const hit = keys.find((k) => s === k || s.endsWith(`-${k}`) || s.includes(`-${k}-`));
   return hit || (m ? m[1] : null);
+}
+
+/**
+ * 将悬停长文拆成「横幅说明 / 角色块 / 普通段落」扁平列表。
+ * 与后端 formatLlmMessagesForHint（[ROLE] + ──── 分隔）及中文【…】标题行对齐。
+ */
+function parsePipelineTipFlat(text) {
+  const raw = String(text ?? "");
+  if (!raw.trim()) return [{ kind: "plain", text: "—" }];
+
+  const parts = [];
+  const megaChunks = raw.split(/\n\n[═─]{8,}\n\n/);
+
+  for (const mega of megaChunks) {
+    let rest = mega.trim();
+    if (!rest) continue;
+
+    while (rest.length) {
+      if (rest.startsWith("【")) {
+        const nl = rest.indexOf("\n");
+        if (nl === -1) {
+          parts.push({ kind: "banner", text: rest });
+          rest = "";
+        } else {
+          parts.push({ kind: "banner", text: rest.slice(0, nl) });
+          rest = rest.slice(nl + 1).trimStart();
+        }
+        continue;
+      }
+
+      const roleMatch = rest.match(/^(\[[A-Za-z][A-Za-z0-9_]*\])\s*\n/);
+      if (roleMatch) {
+        const role = roleMatch[1].slice(1, -1);
+        rest = rest.slice(roleMatch[0].length);
+        const nextBanner = rest.search(/\n【/);
+        const nextRole = rest.search(/\n\[[A-Za-z][A-Za-z0-9_]*\]\n/);
+        let cut = rest.length;
+        if (nextBanner !== -1) cut = Math.min(cut, nextBanner);
+        if (nextRole !== -1) cut = Math.min(cut, nextRole);
+        const body = rest.slice(0, cut).trimEnd();
+        rest = cut >= rest.length ? "" : rest.slice(cut).replace(/^\n+/, "");
+        parts.push({ kind: "role", role, body });
+        continue;
+      }
+
+      const nextBanner = rest.search(/\n【/);
+      const nextRole = rest.search(/\n\[[A-Za-z][A-Za-z0-9_]*\]\n/);
+      let cut = rest.length;
+      if (nextBanner !== -1) cut = Math.min(cut, nextBanner);
+      if (nextRole !== -1) cut = Math.min(cut, nextRole);
+      const plain = rest.slice(0, cut).trim();
+      rest = cut >= rest.length ? "" : rest.slice(cut).replace(/^\n+/, "");
+      if (plain) parts.push({ kind: "plain", text: plain });
+    }
+  }
+
+  if (!parts.length) parts.push({ kind: "plain", text: raw.trim() || "—" });
+  return parts;
+}
+
+/** 每个以「【」开头的标题与其后内容组成可折叠一节，直到下一个「【」标题。 */
+function groupPipelineTipSections(flat) {
+  /** @type {Array<{ kind: "section"; title: string; parts: typeof flat } | { kind: "loose"; part: (typeof flat)[0] }>} */
+  const out = [];
+  let i = 0;
+  while (i < flat.length) {
+    if (flat[i].kind === "banner") {
+      const title = flat[i].text;
+      i++;
+      const inner = [];
+      while (i < flat.length && flat[i].kind !== "banner") {
+        inner.push(flat[i]);
+        i++;
+      }
+      out.push({ kind: "section", title, parts: inner });
+    } else {
+      out.push({ kind: "loose", part: flat[i] });
+      i++;
+    }
+  }
+  return out;
+}
+
+function parsePipelineTipText(text) {
+  return groupPipelineTipSections(parsePipelineTipFlat(text));
+}
+
+function PipelineTipPart({ part, idx }) {
+  if (part.kind === "role") {
+    return (
+      <div key={idx} className="pipelineTipRoleWrap">
+        <div className="pipelineTipRoleBar">
+          <span className="pipelineTipRolePill">{part.role}</span>
+        </div>
+        <pre className="pipelineTipRoleBody">{part.body}</pre>
+      </div>
+    );
+  }
+  return (
+    <pre key={idx} className="pipelineTipPlain">
+      {part.text}
+    </pre>
+  );
+}
+
+function PipelineTipRich({ text }) {
+  const sections = useMemo(() => parsePipelineTipText(text), [text]);
+  return (
+    <div className="pipelineTipRich">
+      {sections.map((g, i) => {
+        if (g.kind === "section") {
+          return (
+            <details key={i} className="pipelineTipDetails" open>
+              <summary className="pipelineTipBanner">{g.title}</summary>
+              <div className="pipelineTipSectionBody">
+                {g.parts.length ? (
+                  g.parts.map((p, j) => <PipelineTipPart key={`${i}-${j}`} part={p} idx={j} />)
+                ) : (
+                  <div className="pipelineTipSectionEmpty">（本节无正文）</div>
+                )}
+              </div>
+            </details>
+          );
+        }
+        return <PipelineTipPart key={i} part={g.part} idx={i} />;
+      })}
+    </div>
+  );
 }
 
 export default function ResearchPipelineModal({ taskId, setUser, onClose }) {
@@ -96,7 +224,27 @@ export default function ResearchPipelineModal({ taskId, setUser, onClose }) {
     (async () => {
       try {
         const mermaid = (await import("mermaid")).default;
-        mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "neutral" });
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "loose",
+          theme: "neutral",
+          flowchart: {
+            curve: "basis",
+            padding: 10,
+            nodeSpacing: 28,
+            rankSpacing: 38
+          },
+          themeVariables: {
+            fontSize: "13px",
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+            primaryColor: "#e8eef8",
+            primaryTextColor: "#0f172a",
+            primaryBorderColor: "#94a3b8",
+            lineColor: "#64748b",
+            clusterBkg: "#f8fafc",
+            titleColor: "#0f172a"
+          }
+        });
         await mermaid.run({ nodes: [el] });
       } catch (e) {
         if (!cancelled && wrap) {
@@ -176,13 +324,39 @@ export default function ResearchPipelineModal({ taskId, setUser, onClose }) {
           ) : null}
         </p>
         <p className="pipelineModal__hint">
-          将鼠标悬停在流程图<strong>节点</strong>上：课题与知识库参考、检索结果、模型输出等默认<strong>全文</strong>展示，可在弹层内滚动。若单字段极大（极少见），服务端会按上限保护；需要更大上限可设置环境变量
-          <code className="pipelineModal__code">RESEARCH_PIPELINE_HINT_MAX_CHARS</code>（默认约 80 万字符）。
+          <strong>怎么读图：</strong>箭头表示先后顺序；「汇聚」表示多子问题并行后再合并；<strong>整稿总编</strong>在审稿之后通读 Markdown（默认开启，可用环境变量{" "}
+          <code className="pipelineModal__code">RESEARCH_GLOBAL_PASS=0</code> 关闭）。节点为阶段说明，完整输入/输出请悬停查看。
+        </p>
+        <ul className="pipelineModal__legend pipelineModal__legend--verbose" aria-label="图例">
+          <li>
+            <strong>课题起点</strong>：用户深度研究主题及对话上文，作为整条管线的输入。
+          </li>
+          <li>
+            <strong>收集（Researcher / Fetcher）</strong>：按子问题做知识库检索与网页检索、抓取与清洗，为阅读阶段准备材料。
+          </li>
+          <li>
+            <strong>Reader</strong>：针对每个子问题阅读来源正文，输出带 URL 的证据要点（bullets）。
+          </li>
+          <li>
+            <strong>Writer</strong>：按子问题把要点写成报告小节（JSON），再拼入最终 Markdown。
+          </li>
+          <li>
+            <strong>摘要与总括（Coordinator）</strong>：在诸小节完成后生成开篇综述与结尾结论。
+          </li>
+          <li>
+            <strong>Critic</strong>：检查来源与表述风险，必要时补搜或改写小节。
+          </li>
+          <li>
+            <strong>整稿总编（GlobalEditor）</strong>：通读整篇一稿，合并跨节重复、理顺综述/正文/结论分工。
+          </li>
+        </ul>
+        <p className="pipelineModal__hint pipelineModal__hint--tight">
+          鼠标悬停在<strong>节点</strong>上可查看该步的模型输入/输出全文（过长时服务端会截断保护）。可调{" "}
+          <code className="pipelineModal__code">RESEARCH_PIPELINE_HINT_MAX_CHARS</code>。
         </p>
         {data?.mermaidDiagramKind === "narrative" ? (
-          <p className="pipelineModal__hint">
-            本图为按子问题归并的叙事结构：收集、阅读、写作在多子问题下以扇出—汇聚表示可并行的分工；悬浮文案按阶段聚合多条
-            trace，与单次调用的逐条时间序可能略有差异。
+          <p className="pipelineModal__hint pipelineModal__hint--tight">
+            叙事图：收集/阅读/写作在多子问题下为扇出—汇聚；与严格时间序 trace 可能略有差异。
           </p>
         ) : null}
         {data?.mermaidTruncated ? (
@@ -222,9 +396,13 @@ export default function ResearchPipelineModal({ taskId, setUser, onClose }) {
                   >
                     {tip.title ? <div className="pipelineNodeTooltip__title">{tip.title}</div> : null}
                     <div className="pipelineNodeTooltip__k">输入</div>
-                    <div className="pipelineNodeTooltip__v">{tip.inputSummary}</div>
+                    <div className="pipelineNodeTooltip__v pipelineNodeTooltip__v--rich">
+                      <PipelineTipRich text={tip.inputSummary} />
+                    </div>
                     <div className="pipelineNodeTooltip__k">输出</div>
-                    <div className="pipelineNodeTooltip__v">{tip.outputSummary}</div>
+                    <div className="pipelineNodeTooltip__v pipelineNodeTooltip__v--rich">
+                      <PipelineTipRich text={tip.outputSummary} />
+                    </div>
                   </div>
                 );
               })(),

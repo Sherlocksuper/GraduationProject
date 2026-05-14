@@ -1,5 +1,6 @@
 import { planTopic } from "./planner.js";
 import { renderReportMarkdown, writeSection } from "./writer.js";
+import { coordinatorBriefTopic } from "./topicSubquestionLines.js";
 import { webSearch } from "./webSearch.js";
 import { webFetchClean } from "./webFetchClean.js";
 import { readEvidence } from "./reader.js";
@@ -30,7 +31,12 @@ export function normalizeResearchRuntime(rt) {
       const s = String(v ?? "").toLowerCase().trim();
       return s === "true" || s === "1" || s === "yes";
     })(),
-    criticRewriteMaxTokens: Math.floor(clampResearch(r.criticRewriteMaxTokens, 400, 2400, 1200))
+    criticRewriteMaxTokens: Math.floor(clampResearch(r.criticRewriteMaxTokens, 400, 2400, 1200)),
+    /** JSON 不合格时最多再向模型要几轮完整输出（Reader/Writer 各自循环上限） */
+    readerJsonAttempts: Math.floor(clampResearch(r.readerJsonAttempts, 1, 4, 2)),
+    readerLlmRetries: Math.floor(clampResearch(r.readerLlmRetries, 1, 8, 3)),
+    writerJsonAttempts: Math.floor(clampResearch(r.writerJsonAttempts, 1, 4, 2)),
+    writerLlmRetries: Math.floor(clampResearch(r.writerLlmRetries, 1, 8, 3))
   };
 }
 
@@ -176,11 +182,41 @@ function mergeKbAndWebDocLists(kbDocs, webDocs, { skipWeb }) {
   return [...kbHead, ...webHead].slice(0, 6);
 }
 
+function envResearchInt(name, def, lo, hi) {
+  const v = Number(String(process.env[name] ?? "").trim());
+  if (!Number.isFinite(v)) return def;
+  return Math.max(lo, Math.min(hi, Math.floor(v)));
+}
+
+/** 有界并发 map：保序，适合子问题检索 / 读写等 I/O 与 LLM 混合阶段。 */
+async function mapLimit(items, limit, mapper) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const lim = Math.max(1, Math.min(Math.floor(limit) || 1, items.length));
+  const ret = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) break;
+      ret[i] = await mapper(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: lim }, () => worker()));
+  return ret;
+}
+
 export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs, runtime } = {}) {
   const task = store.getTask(taskId);
   if (!task) throw new Error("task_not_found");
 
   const rt = normalizeResearchRuntime(runtime);
+  const collectConc = envResearchInt("RESEARCH_COLLECT_CONCURRENCY", 3, 1, 8);
+  const sectionConc = envResearchInt("RESEARCH_SECTION_CONCURRENCY", 2, 1, 6);
+  const fetchTimeoutMs = (() => {
+    const v = Number(String(process.env.RESEARCH_FETCH_TIMEOUT_MS ?? "").trim());
+    if (!Number.isFinite(v)) return 25_000;
+    return Math.max(5000, Math.min(60_000, Math.floor(v)));
+  })();
 
   const add = (event) => store.addTraceEvent(taskId, event);
 
@@ -231,7 +267,6 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
     payload: { msg: "Plan generated", subquestionCount: subquestions.length }
   });
 
-  const collected = [];
   const blockedHosts = [
     "zhihu.com",
     "www.zhihu.com",
@@ -240,7 +275,7 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
     "weixin.qq.com",
     "mp.weixin.qq.com"
   ];
-  for (const sq of subquestions) {
+  const collected = await mapLimit(subquestions, collectConc, async (sq) => {
     const qid = String(sq?.id || "").trim() || "q?";
     const query =
       (Array.isArray(sq?.keywords) && sq.keywords.length
@@ -347,8 +382,7 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
       }
     });
 
-    const webDocs = [];
-    for (const r of results.slice(0, 3)) {
+    const fetchOneTop = async (r) => {
       const host = (() => {
         try {
           return new URL(r.url).host;
@@ -358,25 +392,23 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
       })();
       const snippet = String(r?.snippet || "").trim();
 
-      // 对强反爬/不可抓取站点：直接使用 snippet 作为证据，避免大量 403 噪音
       if (host && blockedHosts.includes(host)) {
         if (snippet) {
-          webDocs.push({ url: r.url, title: r.title || "", text: snippet, via: "snippet" });
           add({
             type: "observation",
             stage: "collecting",
             agent: "Fetcher",
             payload: { subquestionId: qid, url: r.url, chars: snippet.length, via: "snippet", note: "blocked_host_skip_fetch" }
           });
-        } else {
-          add({
-            type: "observation",
-            stage: "collecting",
-            agent: "Fetcher",
-            payload: { subquestionId: qid, url: r.url, via: "skip", note: "blocked_host_skip_fetch_no_snippet" }
-          });
+          return { url: r.url, title: r.title || "", text: snippet, via: "snippet" };
         }
-        continue;
+        add({
+          type: "observation",
+          stage: "collecting",
+          agent: "Fetcher",
+          payload: { subquestionId: qid, url: r.url, via: "skip", note: "blocked_host_skip_fetch_no_snippet" }
+        });
+        return null;
       }
 
       try {
@@ -389,16 +421,16 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
         const doc = await webFetchClean({
           url: r.url,
           useJina: String(process.env.USE_JINA || "0") === "1",
-          timeoutMs: 25_000,
+          timeoutMs: fetchTimeoutMs,
           maxChars: 10_000
         });
-        webDocs.push({ url: doc.url, title: r.title || "", text: doc.text, via: doc.via });
         add({
           type: "observation",
           stage: "collecting",
           agent: "Fetcher",
           payload: { subquestionId: qid, url: r.url, chars: (doc.text || "").length, via: doc.via }
         });
+        return { url: doc.url, title: r.title || "", text: doc.text, via: doc.via };
       } catch (e) {
         add({
           type: "observation",
@@ -407,62 +439,66 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
           payload: { subquestionId: qid, url: r.url, error: String(e?.message || e || "fetch_failed") }
         });
 
-        // 抓取失败时，用搜索 snippet 兜底（也算“有来源”的证据）
         if (snippet) {
-          webDocs.push({
-            url: r.url,
-            title: r.title || "",
-            text: snippet,
-            via: "snippet"
-          });
           add({
             type: "observation",
             stage: "collecting",
             agent: "Fetcher",
             payload: { subquestionId: qid, url: r.url, chars: snippet.length, via: "snippet" }
           });
+          return { url: r.url, title: r.title || "", text: snippet, via: "snippet" };
         }
+        return null;
       }
-    }
+    };
 
-    // 如果抓取几乎全失败，则尝试降低 USE_JINA（直抓），并扩大候选 URL 数
+    const webDocs = (await Promise.all(results.slice(0, 3).map((r) => fetchOneTop(r)))).filter(Boolean);
+
+    // 如果抓取几乎全失败，则尝试降低 USE_JINA（直抓），并扩大候选 URL 数（并行尝试，按序取前两条有效证据）
     if (!skipWeb && webDocs.length === 0) {
       const more = results.slice(0, 6);
-      for (const r of more) {
-        try {
-          const doc = await webFetchClean({
-            url: r.url,
-            useJina: false,
-            timeoutMs: 25_000,
-            maxChars: 10_000
-          });
-          webDocs.push({ url: doc.url, title: r.title || "", text: doc.text, via: doc.via });
-          add({
-            type: "observation",
-            stage: "collecting",
-            agent: "Fetcher",
-            payload: { subquestionId: qid, url: r.url, chars: (doc.text || "").length, via: doc.via }
-          });
-          if (webDocs.length >= 2) break;
-        } catch (e) {
-          add({
-            type: "observation",
-            stage: "collecting",
-            agent: "Fetcher",
-            payload: { subquestionId: qid, url: r.url, error: String(e?.message || e || "fetch_failed") }
-          });
-
-          const snippet2 = String(r?.snippet || "").trim();
-          if (snippet2) {
-            webDocs.push({ url: r.url, title: r.title || "", text: snippet2, via: "snippet" });
+      const extraRows = await Promise.all(
+        more.map(async (r) => {
+          try {
+            const doc = await webFetchClean({
+              url: r.url,
+              useJina: false,
+              timeoutMs: fetchTimeoutMs,
+              maxChars: 10_000
+            });
             add({
               type: "observation",
               stage: "collecting",
               agent: "Fetcher",
-              payload: { subquestionId: qid, url: r.url, chars: snippet2.length, via: "snippet" }
+              payload: { subquestionId: qid, url: r.url, chars: (doc.text || "").length, via: doc.via }
             });
-            if (webDocs.length >= 2) break;
+            return { url: doc.url, title: r.title || "", text: doc.text, via: doc.via };
+          } catch (e) {
+            add({
+              type: "observation",
+              stage: "collecting",
+              agent: "Fetcher",
+              payload: { subquestionId: qid, url: r.url, error: String(e?.message || e || "fetch_failed") }
+            });
+
+            const snippet2 = String(r?.snippet || "").trim();
+            if (snippet2) {
+              add({
+                type: "observation",
+                stage: "collecting",
+                agent: "Fetcher",
+                payload: { subquestionId: qid, url: r.url, chars: snippet2.length, via: "snippet" }
+              });
+              return { url: r.url, title: r.title || "", text: snippet2, via: "snippet" };
+            }
+            return null;
           }
+        })
+      );
+      for (const row of extraRows) {
+        if (row) {
+          webDocs.push(row);
+          if (webDocs.length >= 2) break;
         }
       }
     }
@@ -476,15 +512,15 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
           ? providerSet.join(",")
           : "unknown";
 
-    collected.push({
+    return {
       id: qid,
       question: String(sq?.question || ""),
       keywords: Array.isArray(sq?.keywords) ? sq.keywords : [],
       searchProvider: searchLabel,
       results,
       docs
-    });
-  }
+    };
+  });
   store.putArtifact(taskId, "sources.json", { collected });
 
   add({
@@ -506,9 +542,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
   const notes = [];
   const sections = [];
 
-  for (const sq of subquestions) {
+  const sectionRows = await mapLimit(subquestions, sectionConc, async (sq, si) => {
     const qid = String(sq?.id || "").trim() || "q?";
-    const pack = collected.find((c) => c.id === qid) || { results: [], docs: [] };
+    const pack = collected[si] || collected.find((c) => c.id === qid) || { results: [], docs: [] };
     const urlToSource = new Map(
       (Array.isArray(pack.results) ? pack.results : [])
         .map((r) => [String(r?.url || "").trim(), String(r?.source || "").trim()])
@@ -529,7 +565,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
         trace: (e) => add(e),
         maxTokens: rt.readerMaxTokens,
         maxSources: rt.readerMaxSources,
-        clipChars: rt.readerClipChars
+        clipChars: rt.readerClipChars,
+        jsonAttempts: rt.readerJsonAttempts,
+        llmRetries: rt.readerLlmRetries
       });
     } catch (e) {
       // Reader 解析失败时，不让整个任务失败，降级为基于原始 docs/snippet 的简单要点
@@ -573,6 +611,18 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
       evidenceBullets: evWithSource.bullets
     };
 
+    add({
+      type: "reasoning",
+      stage: "writing",
+      agent: "Coordinator",
+      payload: {
+        msg: "小节写作：正在调用模型生成本节 JSON（此处与下一条 Writer 日志之间通常是一次 LLM 往返；若很久无更新，多为上游排队、限流或超时重试）",
+        sectionIndex: si + 1,
+        sectionTotal: subquestions.length,
+        subquestionId: qid
+      }
+    });
+
     let result;
     try {
       result = await writeSection({
@@ -580,7 +630,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
         topic: task.topic,
         subquestion: enrichedSq,
         trace: (e) => add(e),
-        maxTokens: rt.writerMaxTokens
+        maxTokens: rt.writerMaxTokens,
+        jsonAttempts: rt.writerJsonAttempts,
+        llmRetries: rt.writerLlmRetries
       });
     } catch (e) {
       const urls = Array.from(
@@ -621,7 +673,7 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
     }
 
     const sectionSources = Array.isArray(result.sources) ? result.sources : [];
-    notes.push({
+    const note = {
       id: qid,
       question: String(sq?.question || ""),
       keywords: Array.isArray(sq?.keywords) ? sq.keywords : [],
@@ -645,13 +697,18 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
       evidence: evWithSource,
       sources: sectionSources,
       draft: result
-    });
-    sections.push(result);
+    };
+    return { note, section: result, qid, sectionSources };
+  });
+
+  for (const row of sectionRows) {
+    notes.push(row.note);
+    sections.push(row.section);
     add({
       type: "decision",
       stage: "writing",
       agent: "Coordinator",
-      payload: { msg: "Section drafted", subquestionId: qid, sources: sectionSources.slice(0, 3) }
+      payload: { msg: "Section drafted", subquestionId: row.qid, sources: row.sectionSources.slice(0, 3) }
     });
   }
 
@@ -685,7 +742,19 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
       {
         role: "user",
         content:
-          `主题：${task.topic}\n\n下面是小节要点（只作参考，勿逐条复述）：\n\n${brief}\n\n请写一段自然叙述（约 120-200 字）。`
+          `主题：${coordinatorBriefTopic(task.topic)}\n\n下面是小节要点（只作参考，勿逐条复述）：\n\n${brief}\n\n请写一段自然叙述（约 120-200 字）。`
+      }
+    ];
+    const conclusionMessages = [
+      {
+        role: "system",
+        content:
+          "你用中文写收尾说明，不要虚构数据。不要用编号大纲。语气像聊天总结；**总长度约 200-380 字**，分 2-3 个短自然段即可，不要重复前文已细说的定义。"
+      },
+      {
+        role: "user",
+        content:
+          `主题：${coordinatorBriefTopic(task.topic)}\n\n参考各节要点（勿逐条复述）：\n\n${brief}\n\n请写约 200-380 字。`
       }
     ];
     add({
@@ -698,27 +767,6 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
         llmMessages: compactLlmMessages(overviewMessages)
       }
     });
-    overview = await chatWithRetry({
-      llmClient,
-      stage: "writing",
-      agent: "Coordinator",
-      meta: { kind: "overview" },
-      retries: 4,
-      maxTokens: 480,
-      messages: overviewMessages
-    });
-    const conclusionMessages = [
-      {
-        role: "system",
-        content:
-          "你用中文写收尾说明，不要虚构数据。不要用编号大纲。语气像聊天总结；**总长度约 200-380 字**，分 2-3 个短自然段即可，不要重复前文已细说的定义。"
-      },
-      {
-        role: "user",
-        content:
-          `主题：${task.topic}\n\n参考各节要点（勿逐条复述）：\n\n${brief}\n\n请写约 200-380 字。`
-      }
-    ];
     add({
       type: "action",
       stage: "writing",
@@ -729,28 +777,63 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
         llmMessages: compactLlmMessages(conclusionMessages)
       }
     });
-    conclusion = await chatWithRetry({
-      llmClient,
-      stage: "writing",
-      agent: "Coordinator",
-      meta: { kind: "conclusion" },
-      retries: 4,
-      maxTokens: 640,
-      messages: conclusionMessages
-    });
-    add({
-      type: "observation",
-      stage: "writing",
-      agent: "Coordinator",
-      payload: { kind: "overview", raw: overview }
-    });
-    add({
-      type: "observation",
-      stage: "writing",
-      agent: "Coordinator",
-      payload: { kind: "conclusion", raw: conclusion }
-    });
-    add({ type: "observation", stage: "writing", agent: "Coordinator", payload: { msg: "Overview & conclusion generated" } });
+
+    const [ovSettled, conSettled] = await Promise.allSettled([
+      chatWithRetry({
+        llmClient,
+        stage: "writing",
+        agent: "Coordinator",
+        meta: { kind: "overview" },
+        retries: 4,
+        maxTokens: 480,
+        messages: overviewMessages
+      }),
+      chatWithRetry({
+        llmClient,
+        stage: "writing",
+        agent: "Coordinator",
+        meta: { kind: "conclusion" },
+        retries: 4,
+        maxTokens: 640,
+        messages: conclusionMessages
+      })
+    ]);
+
+    if (ovSettled.status === "fulfilled") {
+      overview = String(ovSettled.value || "").trim();
+      add({
+        type: "observation",
+        stage: "writing",
+        agent: "Coordinator",
+        payload: { kind: "overview", raw: overview }
+      });
+    } else {
+      add({
+        type: "observation",
+        stage: "writing",
+        agent: "Coordinator",
+        payload: { msg: "Overview skipped", error: String(ovSettled.reason?.message || ovSettled.reason || "error") }
+      });
+    }
+
+    if (conSettled.status === "fulfilled") {
+      conclusion = String(conSettled.value || "").trim();
+      add({
+        type: "observation",
+        stage: "writing",
+        agent: "Coordinator",
+        payload: { kind: "conclusion", raw: conclusion }
+      });
+    } else {
+      add({
+        type: "observation",
+        stage: "writing",
+        agent: "Coordinator",
+        payload: { msg: "Conclusion skipped", error: String(conSettled.reason?.message || conSettled.reason || "error") }
+      });
+    }
+
+    add({ type: "observation", stage: "writing", agent: "Coordinator", payload: { msg: "Overview & conclusion pass done" } });
   } catch (e) {
     add({
       type: "observation",
@@ -807,7 +890,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
           trace: (e) => add(e),
           maxTokens: rt.readerMaxTokens,
           maxSources: rt.readerMaxSources,
-          clipChars: rt.readerClipChars
+          clipChars: rt.readerClipChars,
+          jsonAttempts: rt.readerJsonAttempts,
+          llmRetries: rt.readerLlmRetries
         });
         const enrichedSq2 = {
           id: qid,
@@ -820,7 +905,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
           topic: task.topic,
           subquestion: enrichedSq2,
           trace: (e) => add(e),
-          maxTokens: rt.writerMaxTokens
+          maxTokens: rt.writerMaxTokens,
+          jsonAttempts: rt.writerJsonAttempts,
+          llmRetries: rt.writerLlmRetries
         });
         sections[i] = sec2;
         notes[i] = { ...note, evidence: ev2, sources: sec2.sources, draft: sec2 };
@@ -877,7 +964,9 @@ export async function runResearchTask({ store, taskId, llmClient, retrieveKbDocs
           topic: task.topic,
           subquestion: { ...sections[i], id: qid, question: note?.question, keywords: note?.keywords, evidenceBullets },
           trace: (e) => add(e),
-          maxTokens: rt.writerMaxTokens
+          maxTokens: rt.writerMaxTokens,
+          jsonAttempts: rt.writerJsonAttempts,
+          llmRetries: rt.writerLlmRetries
         });
         // 如果上述失败，则至少保留原本 sources，不影响交付
         sections[i] = sec3 || sections[i];

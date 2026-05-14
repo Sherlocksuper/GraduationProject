@@ -100,14 +100,37 @@ function payloadLine(p) {
   }
 }
 
-function escapeMermaidLabel(s) {
+function escapeMermaidLabel(s, maxLen = 72) {
   return String(s || "")
     .replace(/\\/g, "\\\\")
     .replace(/"/g, "#quot;")
     .replace(/\n/g, " ")
     .replace(/[\[\]]/g, " ")
     .trim()
-    .slice(0, 72);
+    .slice(0, maxLen);
+}
+
+function hasGlobalEditorInTrace(events) {
+  const arr = Array.isArray(events) ? events : [];
+  return arr.some((e) => String(e?.agent || "") === "GlobalEditor");
+}
+
+function globalEditorHint(events) {
+  const acts = [];
+  const obs = [];
+  for (const e of events) {
+    if (String(e?.agent) !== "GlobalEditor") continue;
+    const p = payloadObj(e);
+    if (String(e?.type) === "action") {
+      const b = payloadLlmInputBlock(p);
+      if (b) acts.push(`【action】\n\n${b}`);
+    } else {
+      obs.push(`【${e?.type}】\n${payloadLine(p)}`);
+    }
+  }
+  const inputSummary = acts.length ? guardHoverText(acts.join("\n\n════════\n\n")) : "—";
+  const outputSummary = obs.length ? guardHoverText(obs.join("\n\n════════\n\n")) : "—";
+  return hintObj("总编 · 整稿润色", inputSummary, outputSummary);
 }
 
 function payloadObj(e) {
@@ -402,6 +425,7 @@ function reviewingDetailFromEvents(events) {
   const lines = [];
   for (const e of events) {
     if (String(e?.stage || "") !== "reviewing") continue;
+    if (String(e?.agent) === "GlobalEditor") continue;
     lines.push(`[${e?.type}/${e?.agent}] ${payloadLine(payloadObj(e))}`);
   }
   return lines.join("\n\n") || "—";
@@ -411,6 +435,7 @@ function reviewingInputFromEvents(events) {
   const blocks = [];
   for (const e of events) {
     if (String(e?.stage) !== "reviewing") continue;
+    if (String(e?.agent) === "GlobalEditor") continue;
     if (String(e?.type) !== "action") continue;
     const p = payloadObj(e);
     const block = payloadLlmInputBlock(p);
@@ -543,6 +568,12 @@ function buildNarrativeMermaid(events, topicSnap) {
     prev = "Mrev";
   }
 
+  if (hasGlobalEditorInTrace(events)) {
+    lines.push(`  Medit["整稿总编（GlobalEditor）"]`);
+    lines.push(`  ${prev} --> Medit`);
+    prev = "Medit";
+  }
+
   if (events.some((e) => String(e?.type || "") === "final" || String(e?.stage || "") === "done")) {
     lines.push(`  Mdone(["完成"])`);
     lines.push(`  ${prev} --> Mdone`);
@@ -650,6 +681,10 @@ function buildNarrativeMermaid(events, topicSnap) {
 
   if (hasStage(events, "reviewing")) {
     diagramNodeHints.Mrev = hintObj("Critic 审稿", reviewingInputFromEvents(events), reviewingDetailFromEvents(events));
+  }
+
+  if (hasGlobalEditorInTrace(events)) {
+    diagramNodeHints.Medit = globalEditorHint(events);
   }
 
   if (events.some((e) => String(e?.type || "") === "final" || String(e?.stage || "") === "done")) {

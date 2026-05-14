@@ -48,6 +48,7 @@ function clipText(text, maxChars = 2800) {
 
 import { chatWithRetry } from "./llmChat.js";
 import { compactLlmMessages } from "./llmTraceMessages.js";
+import { topicAndSubquestionLinesForAgent } from "./topicSubquestionLines.js";
 
 export async function readEvidence({
   llmClient,
@@ -57,7 +58,9 @@ export async function readEvidence({
   trace,
   maxTokens = 900,
   maxSources = 3,
-  clipChars = 2400
+  clipChars = 2400,
+  jsonAttempts,
+  llmRetries
 } = {}) {
   if (!llmClient) throw new Error("llm_not_configured");
   const sq = subquestion || {};
@@ -93,8 +96,7 @@ export async function readEvidence({
     "- gaps 固定 2 条，描述仍缺的证据点。",
     "- 不要输出 Markdown，不要输出解释。",
     "",
-    `主题：${topic}`,
-    `子问题(${qid})：${question}`,
+    ...topicAndSubquestionLinesForAgent(topic, qid, question),
     "",
     "来源（每条含 URL 与正文片段）：",
     ...sources.map(
@@ -108,7 +110,8 @@ export async function readEvidence({
     { role: "user", content: prompt }
   ];
 
-  const attempts = 3;
+  const attempts = Number.isFinite(jsonAttempts) ? Math.max(1, Math.min(5, Math.floor(jsonAttempts))) : 3;
+  const chatRetries = Number.isFinite(llmRetries) ? Math.max(1, Math.min(8, Math.floor(llmRetries))) : 4;
   for (let i = 0; i < attempts; i++) {
     trace?.({
       type: "action",
@@ -126,7 +129,7 @@ export async function readEvidence({
       messages,
       temperature: 0.2,
       maxTokens: tokCap,
-      retries: 4,
+      retries: chatRetries,
       trace,
       stage: "reading",
       agent: "Reader",
