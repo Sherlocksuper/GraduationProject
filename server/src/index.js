@@ -16,7 +16,7 @@ import {
   isSmtpConfigured,
   sendLoginCodeEmail,
   sendPasswordResetEmail,
-  sendVerificationEmail
+  sendRegistrationVerifyCodeEmail
 } from "./auth/mail.js";
 import { requireLogin } from "./auth/middleware.js";
 import { bearerToken, signAuthToken, verifyAuthToken } from "./auth/jwt.js";
@@ -32,6 +32,10 @@ const users = new UserStore();
 /** 登录验证码发送成功后的冷却（按邮箱），毫秒 */
 const LOGIN_CODE_COOLDOWN_MS = 60_000;
 const loginCodeSentAt = new Map();
+
+/** 注册验证码「重新发送」冷却（按邮箱），毫秒 */
+const REGISTER_VERIFY_COOLDOWN_MS = 60_000;
+const registerVerifySentAt = new Map();
 
 /** 同一用户下同一会话仅允许一条在跑的研究（防并发） */
 const chatResearchInflight = new Map();
@@ -434,24 +438,26 @@ app.post("/api/auth/register", async (req, res) => {
     const r = users.register({ username, password, email });
     if (!r.ok) return res.status(400).json({ error: r.error });
     try {
-      await sendVerificationEmail(r.email, r.verifyToken);
+      await sendRegistrationVerifyCodeEmail(r.email, r.code);
+      registerVerifySentAt.set(String(r.email || "").toLowerCase(), Date.now());
     } catch (e) {
-      process.stderr.write(`[mail] sendVerificationEmail: ${e?.stack || e}\n`);
+      process.stderr.write(`[mail] sendRegistrationVerifyCodeEmail: ${e?.stack || e}\n`);
       return res.status(500).json({
         error: "email_send_failed",
         detail: String(e?.message || e)
       });
     }
-    res.json({ ok: true, message: "verification_email_sent" });
+    res.json({ ok: true, message: "verification_code_sent" });
   } catch (e) {
     res.status(500).json({ error: e?.message || "internal_error" });
   }
 });
 
-app.get("/api/auth/verify-email", (req, res) => {
+app.post("/api/auth/verify-email-code", (req, res) => {
   try {
-    const token = String(req.query?.token || "").trim();
-    const r = users.verifyEmailToken(token);
+    const email = String(req.body?.email || "").trim();
+    const code = String(req.body?.code ?? "").trim();
+    const r = users.verifyRegistrationOtp(email, code);
     if (!r.ok) return res.status(400).json({ error: r.error || "verify_failed" });
     res.json({ ok: true, username: r.username });
   } catch (e) {
@@ -464,8 +470,15 @@ app.post("/api/auth/resend-verification", async (req, res) => {
     if (!isSmtpConfigured()) {
       return res.status(503).json({ error: "smtp_not_configured" });
     }
-    const email = String(req.body?.email || "").trim();
-    const r = users.resendVerification(email);
+    const emailRaw = String(req.body?.email || "").trim();
+    const emailNorm = emailRaw.toLowerCase();
+    const now = Date.now();
+    const last = registerVerifySentAt.get(emailNorm) || 0;
+    if (now - last < REGISTER_VERIFY_COOLDOWN_MS) {
+      const retryAfterSec = Math.ceil((REGISTER_VERIFY_COOLDOWN_MS - (now - last)) / 1000);
+      return res.status(429).json({ error: "rate_limited", retryAfterSec });
+    }
+    const r = users.resendVerification(emailRaw);
     if (!r.ok && r.error === "already_verified") {
       return res.status(400).json({ error: r.error });
     }
@@ -473,9 +486,10 @@ app.post("/api/auth/resend-verification", async (req, res) => {
       return res.json({ ok: true });
     }
     try {
-      await sendVerificationEmail(r.email, r.verifyToken);
+      await sendRegistrationVerifyCodeEmail(r.email, r.code);
+      registerVerifySentAt.set(emailNorm, Date.now());
     } catch (e) {
-      process.stderr.write(`[mail] resend: ${e?.stack || e}\n`);
+      process.stderr.write(`[mail] resend registration code: ${e?.stack || e}\n`);
       return res.status(500).json({ error: "email_send_failed", detail: String(e?.message || e) });
     }
     res.json({ ok: true });

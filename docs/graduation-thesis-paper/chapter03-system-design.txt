@@ -1,0 +1,487 @@
+第3章  系统设计
+
+3.1  引言
+
+本章在需求分析基础上完成系统设计，明确总体架构、功能模块划分、核心实体与数据存储结构，并对认证与会话、智能对话与工具编排、知识库与检索增强、深度研究管线及过程展示等关键功能给出设计说明。最后补充错误处理、并发与界面等非功能性设计要点，为第4章系统实现与第5章测试提供依据。
+
+3.2  系统架构
+
+本系统为 B/S 与前后端分离：前端采用 React+Vite 单页应用，经 JSON 调用 Express（Node.js）后端；会话与消息、知识库、研究任务等持久化于 SQLite（默认 data/app.db），用户账户等当前存于 data/users.json，逻辑上仍归为用户域。大模型、嵌入与联网检索由环境变量配置的外部服务提供，经封装客户端调用，与业务进程解耦。总体结构见图3-1。
+
+图3-1  系统总体架构图
+
+（截图占位：若需补充「运行拓扑」照片，可在此插入一张自绘或 draw.io 导出的「浏览器—Node 服务—SQLite—外部 LLM」示意图，图题仍用图3-1 或改为图3-1（b）。）
+
+---------- PlantUML 图3-1 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+skinparam shadowing false
+title 图3-1  系统总体架构图
+
+actor "注册用户" as U
+rectangle "客户端（浏览器）" {
+  [React 单页应用] as WEB
+}
+rectangle "服务端（Node.js + Express）" {
+  [REST API / 路由] as API
+  [认证与用户存储] as AUTH
+  [聊天与会话] as CHAT
+  [知识库与向量] as RAG
+  [研究任务与编排] as RES
+  [大模型与嵌入客户端] as LLM
+}
+database "SQLite\n(app.db)" as DB
+cloud "外部能力\n(LLM / 嵌入 API /\n联网检索等)" as EXT
+
+U --> WEB
+WEB --> API : JSON / HTTP
+API --> AUTH
+API --> CHAT
+API --> RAG
+API --> RES
+CHAT --> DB
+RAG --> DB
+RES --> DB
+CHAT --> LLM
+RAG --> LLM
+RES --> LLM
+LLM --> EXT
+@enduml
+---------- PlantUML 图3-1 结束 ----------
+
+前端采用 React 组织页面与组件，负责路由、会话与聊天等交互状态；Vite 负责开发与打包。用户在浏览器中操作界面，由前端将登录、会话、知识库、研究等请求以 HTTP（开发环境可为本地 HTTP）与 JSON 载荷发送至服务端接口。
+
+服务端基于 Express 注册路由与中间件：除注册、登录、邮箱验证等公开接口外，受保护接口在统一鉴权逻辑中解析 Bearer Token，未携带或无效时返回 401；通过后进入各业务路由处理函数，调用聊天仓储、知识库仓储、研究存储及大模型客户端等模块完成业务并返回 JSON。
+
+数据方面，会话、消息、知识库分块与研究任务等结构化数据存放在 SQLite（app.db）；用户账户、验证与验证码等当前实现为本地 JSON 文件（如 users.json），与库表在部署上分离但在领域上仍视为用户数据。大模型推理、向量嵌入与联网检索由外部服务承担，服务端仅保存调用所需配置与业务侧产物，不在库内持久化模型参数。
+
+前后端职责清晰、接口以 REST 为主，便于替换模型供应商、扩展新路由或独立演进前端展示，有利于后期维护与功能扩展。
+
+3.3  系统功能模块
+
+结合第2章用例，将系统划分为以下功能模块：用户认证与账户模块、多会话聊天模块、ReAct 工具编排模块、知识库管理模块、检索增强对话模块、深度研究任务模块、研究过程与产物展示模块。各模块在服务端通过路由与仓储类协作，前端以页面或面板形式提供入口。
+
+功能模块结构如图3-2所示。
+
+图3-2  系统功能模块图
+
+---------- PlantUML 图3-2 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+title 图3-2  系统功能模块图
+
+package "用户认证与账户" {
+  [注册/邮箱验证]
+  [登录/验证码登录]
+  [登出/重置密码]
+}
+
+package "多会话聊天" {
+  [会话列表与切换]
+  [消息收发与历史]
+  [会话标题维护]
+}
+
+package "工具编排（ReAct）" {
+  [工具注册表]
+  [多轮解析与执行]
+  [观察结果回填]
+}
+
+package "知识库" {
+  [集合管理]
+  [分块与嵌入入库]
+  [会话绑定多库]
+}
+
+package "检索增强对话" {
+  [问句嵌入]
+  [向量检索与合并]
+  [片段注入提示词]
+}
+
+package "深度研究" {
+  [规划子问题]
+  [检索与抓取]
+  [证据提炼与写作]
+  [评审与润色（可选）]
+}
+
+package "过程与产物" {
+  [任务状态轮询]
+  [Trace 展示]
+  [报告与附件下载]
+}
+
+[注册/邮箱验证] ..> [会话列表与切换] : 登录后
+[会话列表与切换] ..> [消息收发与历史]
+[消息收发与历史] ..> [工具注册表] : 按需
+[消息收发与历史] ..> [问句嵌入] : 绑定知识库时
+[会话列表与切换] ..> [任务状态轮询] : 深度研究时
+@enduml
+---------- PlantUML 图3-2 结束 ----------
+
+如图3-2，功能模块按「先能登录与会话、再在会话里扩展能力」组织，各包之间以虚线表示常见触发关系。
+
+用户认证与账户、多会话聊天构成基础层：完成注册验证与登录后，用户可维护多个会话，在会话列表中切换，收发消息并由系统维护标题与历史。
+
+工具编排（ReAct）与检索增强对话建立在会话之上：前者在需要确定性能力时由模型发起工具调用并由服务端回填观察；后者在会话绑定知识库后，对问句做嵌入、多库检索与片段注入，再参与生成。
+
+深度研究与过程、产物模块面向长任务：规划、检索与抓取、证据提炼与写作、评审及可选全文润色串成管线；前端通过轮询查看任务状态，展示 Trace 与报告等产物，使用户可感知后台编排过程。
+
+本系统不设独立管理端，运维类能力可在后续版本中扩展。
+
+3.4  系统实体类及描述
+
+3.4.1  系统实体类设计
+
+从领域模型角度，系统核心实体包括：用户（User）、聊天会话（ChatSession）、聊天消息（ChatMessage）、知识库集合（RagCollection）、知识库文本分块（RagChunk）、研究任务（ResearchTask）。用户与后五类对象存在一对多关联；聊天会话与消息为组合关系；知识库集合与分块为组合关系；研究任务独立归属用户，并通过任务标识与会话中的助手消息元数据建立弱关联（便于在对话中回溯）。
+
+系统实体类如图3-3所示。
+
+图3-3  系统实体类图
+
+---------- PlantUML 图3-3 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+title 图3-3  系统实体类图
+
+class User {
+  -username: varchar
+  -password: varchar
+  -email: varchar
+  -emailVerified: boolean
+  -verifyToken: varchar
+  -verifyExpires: bigint
+  -resetToken: varchar
+  -resetExpires: bigint
+  -loginOtpCode: varchar
+  -loginOtpExpires: bigint
+  -createdAt: bigint
+}
+
+class ChatSession {
+  -id: varchar
+  -username: varchar
+  -title: varchar
+  -createdAt: bigint
+  -updatedAt: bigint
+  -ragCollectionIdsJson: text
+}
+
+class ChatMessage {
+  -id: int
+  -sessionId: varchar
+  -role: varchar
+  -content: text
+  -ts: bigint
+  -metaJson: text
+}
+
+class RagCollection {
+  -id: varchar
+  -username: varchar
+  -name: varchar
+  -embeddingModel: varchar
+  -createdAt: bigint
+}
+
+class RagChunk {
+  -id: int
+  -collectionId: varchar
+  -chunkIndex: int
+  -content: text
+  -embeddingJson: text
+}
+
+class ResearchTask {
+  -id: varchar
+  -username: varchar
+  -topic: text
+  -status: varchar
+  -error: text
+  -createdAt: bigint
+  -updatedAt: bigint
+  -artifactsJson: text
+  -traceJson: text
+}
+
+User "1" -- "0..*" ChatSession
+User "1" -- "0..*" RagCollection
+User "1" -- "0..*" ResearchTask
+ChatSession "1" *-- "0..*" ChatMessage
+RagCollection "1" *-- "0..*" RagChunk
+
+note right of User
+  逻辑实体；物理存储为\nusers.json
+end note
+
+@enduml
+---------- PlantUML 图3-3 结束 ----------
+
+3.4.2  关键实体类解释
+
+用户（User）：系统访问主体，保存登录凭据、邮箱验证状态、密码重置与登录验证码等字段；登录成功后由服务端签发令牌供后续请求携带。
+
+聊天会话（ChatSession）：用户在会话维度组织多轮对话，保存标题、创建与更新时间，以及本会话绑定的知识库集合标识列表（JSON 数组形式持久化）。
+
+聊天消息（ChatMessage）：隶属于会话，记录角色（用户或助手等）、正文、时间戳及可选元数据（如关联的研究任务标识），用于前端渲染与上下文组装。
+
+知识库集合（RagCollection）与分块（RagChunk）：集合描述知识库名称及所用嵌入模型标识；分块存储被切分后的文本与对应向量（以 JSON 形式存储于 SQLite 字段中，便于实现阶段简化序列化）。
+
+研究任务（ResearchTask）：描述一次深度研究运行的主题、状态、错误信息、结构化产物（如规划、笔记、报告等 JSON 对象）及轨迹数组，供轮询接口与前端展示使用。
+
+3.5  数据结构设计
+
+业务库采用 SQLite，库文件路径可由环境变量配置，默认位于服务端 data 目录。以下为与实现一致的主要表结构说明；字段类型以 SQLite 类型为主，「接受空值」中 YES 表示允许 NULL。
+
+表3-1  聊天会话表（chat_sessions）
+
+属性	含义	类型	接受空值	说明
+id	会话主键	TEXT	NO	全局唯一标识
+username	所属用户名	TEXT	NO	与登录用户对应
+title	会话标题	TEXT	NO	可由首条用户消息摘要生成
+created_at	创建时间	INTEGER	NO	Unix 毫秒时间戳
+updated_at	更新时间	INTEGER	NO	随消息追加更新
+rag_collection_ids_json	绑定知识库 id 列表	TEXT	NO	JSON 数组字符串，默认 []
+
+表3-2  聊天消息表（chat_messages）
+
+属性	含义	类型	接受空值	说明
+id	消息自增主键	INTEGER	NO	主键，自增
+session_id	所属会话 id	TEXT	NO	外键关联 chat_sessions.id，级联删除
+role	消息角色	TEXT	NO	如 user、assistant
+content	消息正文	TEXT	NO	
+ts	时间戳	INTEGER	NO	Unix 毫秒
+meta_json	扩展元数据	TEXT	YES	JSON，如研究任务 id 等
+
+表3-3  知识库集合表（rag_collections）
+
+属性	含义	类型	接受空值	说明
+id	集合主键	TEXT	NO	全局唯一
+username	所属用户名	TEXT	NO	
+name	集合名称	TEXT	NO	
+embedding_model	嵌入模型标识	TEXT	NO	可为空串表示默认
+created_at	创建时间	INTEGER	NO	
+
+表3-4  知识库分块表（rag_chunks）
+
+属性	含义	类型	接受空值	说明
+id	分块自增主键	INTEGER	NO	主键，自增
+collection_id	所属集合 id	TEXT	NO	外键，级联删除
+chunk_index	分块序号	INTEGER	NO	集合内顺序
+content	分块文本	TEXT	NO	
+embedding_json	向量序列化	TEXT	NO	JSON 数组等可解析形式
+
+表3-5  研究任务表（research_tasks）
+
+属性	含义	类型	接受空值	说明
+id	任务主键	TEXT	NO	
+username	所属用户名	TEXT	NO	
+topic	研究主题	TEXT	NO	
+status	任务状态	TEXT	NO	如 created、running、done、failed
+error	错误信息	TEXT	YES	失败时记录
+created_at	创建时间	INTEGER	NO	
+updated_at	更新时间	INTEGER	NO	
+artifacts_json	产物字典	TEXT	NO	JSON 对象，默认 {}
+trace_json	轨迹数组	TEXT	NO	JSON 数组，默认 []
+
+索引设计：在 chat_sessions 上建立 (username, updated_at DESC) 索引以加速会话列表查询；在 chat_messages 上建立 (session_id, id) 索引以加速按会话拉取消息顺序；在 rag_chunks 上建立 (collection_id, chunk_index) 索引以支持分块遍历与检索实现；在 research_tasks 上建立 (username, updated_at DESC) 索引以支持任务列表与清理策略。
+
+用户数据文件：当前实现将注册用户条目存放于 data/users.json 的根对象 users 下，键为用户名，值为包含密码、邮箱、验证令牌与过期时间、登录一次性验证码等字段的对象。论文中可将其视为「用户逻辑表」，若后续改为关系库存储，可保持字段语义不变迁移至 user 物理表。
+
+3.6  系统功能设计及描述
+
+3.6.1  用户认证与会话管理功能
+
+认证流程采用服务端校验与令牌机制：注册需邮箱与验证链接；登录支持密码或邮箱验证码等方式；受保护接口在路由层校验令牌并解析用户名，再执行业务逻辑。会话管理包括创建会话、列举会话、更新标题、删除会话及维护会话级知识库绑定列表。
+
+认证与会话在前端的典型调用顺序如图3-4所示（密码登录路径；验证码登录与之类似，图中从略）。
+
+图3-4  用户登录与会话进入时序图（简化）
+
+---------- PlantUML 图3-4 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+title 图3-4  用户登录与会话进入时序图（简化）
+
+actor 用户 as U
+participant "前端 SPA" as FE
+participant "Express\n认证与会话 API" as API
+
+U -> FE : 输入用户名与密码并登录
+FE -> API : POST /api/auth/login
+API --> FE : 200 token、user
+
+U -> FE : 进入聊天主页
+FE -> API : GET /api/chats\n(Bearer token)
+API --> FE : 200 chats 列表
+
+opt 需要新会话时
+  U -> FE : 新建对话
+  FE -> API : POST /api/chats
+  API --> FE : 200 新会话信息
+end
+
+U -> FE : 选择某会话
+FE -> API : GET /api/chats/:id/messages
+API --> FE : 200 消息列表
+FE --> U : 渲染会话与历史
+
+@enduml
+---------- PlantUML 图3-4 结束 ----------
+
+3.6.2  多会话智能对话与 ReAct 工具编排功能
+
+对话接口接收用户消息与会话标识，读取历史消息组装为模型多轮输入；若启用 ReAct 编排，则由编排器循环调用大模型，解析其输出的工具请求 JSON，交由工具注册表执行并将观察写回消息列表，直至模型输出最终答复或无工具请求为止。
+
+会话内「发送消息—获取回复」的交互顺序如图3-5所示。
+
+图3-5  会话内对话与工具编排时序图
+
+---------- PlantUML 图3-5 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+title 图3-5  会话内对话与工具编排时序图（简化）
+
+actor 用户 as U
+participant "前端 SPA" as FE
+participant "Express\n/chat API" as API
+participant "编排器\n(ReAct)" as ORC
+participant "工具注册表" as TR
+participant "大语言模型" as LLM
+
+U -> FE : 输入消息并发送
+FE -> API : POST 消息（带令牌）
+API -> ORC : 组装上下文并迭代
+loop 直至无工具或达上限
+  ORC -> LLM : chat(messages)
+  LLM --> ORC : 结构化输出\n(tool_requests / final)
+  alt 存在工具请求
+    ORC -> TR : 执行工具
+    TR --> ORC : observation
+  else 无工具
+    ORC --> API : 最终答复文本
+  end
+end
+API -> API : 持久化助手消息
+API --> FE : 返回消息列表
+FE --> U : 展示回复
+@enduml
+---------- PlantUML 图3-5 结束 ----------
+
+3.6.3  知识库管理与 RAG 增强对话功能
+
+知识库侧提供集合增删、分块写入与更新、批量删除等接口；嵌入由独立模块调用外部嵌入 API 生成向量并写入 embedding_json。对话侧在用户绑定集合后，将用户问题嵌入为查询向量，对各集合分别检索后按相似度合并截断，将片段格式化写入系统提示或附加消息，再调用大模型生成回答；可配置最低相似度阈值，低于阈值时整轮不注入片段以避免噪声。
+
+3.6.4  深度研究（规划—检索/抓取—证据提炼—写作—评审）功能
+
+深度研究任务由独立存储记录状态与产物；运行管线在服务端异步或同步推进（实现上可与 HTTP 请求生命周期绑定），阶段一般包括：规划子问题、联网检索与网页文本获取、阅读器抽取证据要点、写作器生成章节化报告、批评者进行基础检查与可选重写、全局润色（若启用）。各阶段向 trace 数组追加事件，向 artifacts 字典写入命名产物，供前端轮询展示。
+
+深度研究主过程如图3-6所示。
+
+图3-6  深度研究管线活动图
+
+---------- PlantUML 图3-6 开始 ----------
+@startuml
+skinparam defaultFontName SansSerif
+left to right direction
+title 图3-6  深度研究管线活动图（逻辑）
+
+start
+:创建任务并置状态;
+:规划子问题 (Planner);
+repeat
+  :检索与抓取资料\n阅读提炼证据 (Reader)\n写作小节 (Writer);
+repeat while (还有未处理子问题?) is (是)
+->否;
+:质量检查 (Critic);
+if (启用全文润色?) then (是)
+  :全局编辑 pass;
+else (否)
+endif
+:写入报告等产物\n更新 trace;
+:任务完成;
+stop
+@enduml
+---------- PlantUML 图3-6 结束 ----------
+
+3.6.5  研究过程追踪与结果展示功能
+
+客户端以任务标识轮询研究任务接口，解析 status、error、artifacts 与 trace；对 Markdown 报告提供渲染区，对 trace 提供折叠列表或时间线视图，使用户可对照第2章「可解释性」需求理解系统行为。
+
+（截图占位：图3-7 深度研究进行中或完成后的界面截图，需包含状态、报告区或 trace 区域之一。）
+
+3.7  系统非功能性设计及描述
+
+3.7.1  LLM 与外部接口错误处理与重试
+
+对大模型聊天、嵌入及外部检索等调用设置超时与重试策略；对模型输出 JSON 解析失败时进行有限次重试或降级为纯文本段落，避免整条研究任务因单次解析失败而不可用。HTTP 层统一返回结构化错误码与中文提示信息，前端对 401、409 等状态做分支提示。
+
+3.7.2  并发与资源控制
+
+对同一会话并发的深度研究请求在服务端以映射表防重入，避免同一用户界面重复提交导致多任务写乱；研究任务数量可按用户维度设置上限并淘汰最早任务。消息表对单会话消息条数可截断保留最近若干条，以控制上下文规模与存储膨胀。
+
+3.7.3  用户界面与交互设计
+
+聊天区采用清晰的消息气泡与时间顺序；代码与列表类内容可结合 Markdown 渲染；知识库管理页提供集合与分块列表及操作按钮；深度研究页突出任务状态、耗时预期与 trace 可读性。具体配色与布局以实现为准。
+
+以下线框为低保真原型示意，使用 PlantUML Salt 语法出图（方框与占位文字风格与常见论文原型图一致）；用 PlantUML 插件或命令行渲染后插入 Word。若本地 Salt 报错，可改用截图或 draw.io。
+
+图3-8  聊天主界面线框图（低保真）
+
+---------- PlantUML 图3-8 Salt 开始 ----------
+@startuml
+salt
+{
+{*图3-8 聊天主界面线框*}
+{+
+{+会话侧栏
+[+ 新对话]
+会话 A
+会话 B
+……
+}|
+{+主聊天区
+[当前会话标题]
+用户：一句提问占位
+……
+助手：Markdown 多行占位
+……
+[输入消息………………] [发送]
+}
+}
+}
+@enduml
+---------- PlantUML 图3-8 Salt 结束 ----------
+
+图3-9  知识库管理线框图（低保真）
+
+---------- PlantUML 图3-9 Salt 开始 ----------
+@startuml
+salt
+{
+{*图3-9 知识库管理线框*}
+{+
+{+左侧
+[+ 新建集合]
+集合 A（12 块）
+集合 B
+……
+}|
+{+右侧
+查询 | "集合名…" | [搜索]
+分块 #0 文本占位………… [保存]
+分块 #1 …………
+[+ 添加分块] [删除所选]
+}
+}
+}
+@enduml
+---------- PlantUML 图3-9 Salt 结束 ----------
+
+3.8  本章小结
+
+本章给出了基于多智能体协作思想的智能聊天系统在架构、模块、实体与数据层面的设计方案，说明了 SQLite 各业务表及用户 JSON 存储的职责划分，并对认证与会话、对话与 ReAct 编排、知识库与检索增强、深度研究管线及过程展示等核心功能进行了图示化设计，同时归纳了错误处理、并发与界面等非功能性策略。后续章节将依据本章设计展开实现与测试说明。

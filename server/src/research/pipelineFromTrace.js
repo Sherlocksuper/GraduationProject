@@ -26,6 +26,13 @@ function guardHoverText(s, max = hintMaxChars()) {
   return `${t.slice(0, max)}\n\n…（已超过单字段上限 ${max} 字符；可设置环境变量 RESEARCH_PIPELINE_HINT_MAX_CHARS 提高）`;
 }
 
+/** 多条 trace 若 llmMessages 格式化后相同（如 Reader 重试），用于去重 */
+function hintDedupeKey(text) {
+  const t = String(text).replace(/\s+/g, " ").trim();
+  if (t.length <= 24_000) return t;
+  return `${t.length}\n${t.slice(0, 12_000)}\n${t.slice(-12_000)}`;
+}
+
 function payloadLine(p) {
   if (!p || typeof p !== "object") return "—";
   const llmBlock = payloadLlmInputBlock(p);
@@ -290,12 +297,16 @@ function matchReadQ(e, qid) {
 
 function readingLaneInputFromEvents(events, qid) {
   const blocks = [];
+  const seenBody = new Set();
   for (const e of events) {
     if (!matchReadQ(e, qid)) continue;
     if (String(e?.agent) !== "Reader" || String(e?.type) !== "action") continue;
     const p = payloadObj(e);
     const block = payloadLlmInputBlock(p);
     if (!block) continue;
+    const dk = hintDedupeKey(block);
+    if (seenBody.has(dk)) continue;
+    seenBody.add(dk);
     const tag = p.attempt != null ? `第 ${p.attempt} 次调用` : "调用";
     blocks.push(`【Reader · ${tag} · 送入模型的完整 messages】\n\n${block}`);
   }
@@ -335,12 +346,16 @@ function matchWriteQ(e, qid) {
 
 function writingLaneInputFromEvents(events, qid) {
   const blocks = [];
+  const seenBody = new Set();
   for (const e of events) {
     if (!matchWriteQ(e, qid)) continue;
     if (String(e?.agent) !== "Writer" || String(e?.type) !== "action") continue;
     const p = payloadObj(e);
     const block = payloadLlmInputBlock(p);
     if (!block) continue;
+    const dk = hintDedupeKey(block);
+    if (seenBody.has(dk)) continue;
+    seenBody.add(dk);
     const tag = p.attempt != null ? `第 ${p.attempt} 次调用` : "调用";
     blocks.push(`【Writer · ${tag} · 送入模型的完整 messages】\n\n${block}`);
   }
@@ -383,12 +398,16 @@ function writingLaneHint(events, qid, title) {
 
 function integratingInputFromEvents(events) {
   const blocks = [];
+  const seenBody = new Set();
   for (const e of events) {
     if (String(e?.stage) !== "writing" || String(e?.agent) !== "Coordinator") continue;
     if (String(e?.type) !== "action") continue;
     const p = payloadObj(e);
     const block = payloadLlmInputBlock(p);
     if (!block) continue;
+    const dk = hintDedupeKey(block);
+    if (seenBody.has(dk)) continue;
+    seenBody.add(dk);
     const label = [p.kind, p.msg].filter(Boolean).join(" · ") || "Coordinator LLM";
     blocks.push(`【${label}】\n\n${block}`);
   }
@@ -433,6 +452,7 @@ function reviewingDetailFromEvents(events) {
 
 function reviewingInputFromEvents(events) {
   const blocks = [];
+  const seenBody = new Set();
   for (const e of events) {
     if (String(e?.stage) !== "reviewing") continue;
     if (String(e?.agent) === "GlobalEditor") continue;
@@ -440,6 +460,9 @@ function reviewingInputFromEvents(events) {
     const p = payloadObj(e);
     const block = payloadLlmInputBlock(p);
     if (!block) continue;
+    const dk = hintDedupeKey(block);
+    if (seenBody.has(dk)) continue;
+    seenBody.add(dk);
     const who = String(e?.agent || "Agent");
     const label = p.fix || p.msg || "action";
     blocks.push(`【${who} · ${label}】\n\n${block}`);

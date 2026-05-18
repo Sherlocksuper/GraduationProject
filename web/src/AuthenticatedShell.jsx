@@ -1,4 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
+import { APP_DISPLAY_NAME } from "./brand.js";
 
 export function AuthenticatedShell({ user, authBusy, onLogout, subtitle, sidebar }) {
   const loc = useLocation();
@@ -11,7 +12,7 @@ export function AuthenticatedShell({ user, authBusy, onLogout, subtitle, sidebar
       <header className="header">
         <div className="titleRow">
           <div className="titleRowLeft">
-            <div className="title">DeepResearch</div>
+            <div className="title">{APP_DISPLAY_NAME}</div>
             <nav className="tabs" aria-label="主功能">
               <Link to="/" className={`tab ${tab === "chat" ? "tab--active" : ""}`}>
                 对话

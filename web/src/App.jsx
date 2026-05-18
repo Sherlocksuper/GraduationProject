@@ -22,6 +22,7 @@ import {
   resolveAgentLabel,
   isAgentTraceHighlighted
 } from "./agentPreferences.js";
+import { APP_DISPLAY_NAME } from "./brand.js";
 
 function newId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -52,6 +53,9 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [registerDone, setRegisterDone] = useState(false);
+  /** 注册第二步：邮箱收到的 6 位验证码 */
+  const [registerVerifyOtp, setRegisterVerifyOtp] = useState("");
+  const [registerVerifyCooldown, setRegisterVerifyCooldown] = useState(0);
   const [forgotDone, setForgotDone] = useState(false);
   const [verifyBanner, setVerifyBanner] = useState("");
   const [resetUrlToken, setResetUrlToken] = useState("");
@@ -187,34 +191,11 @@ export default function App() {
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    const v = p.get("verify");
     const rs = p.get("reset");
-    if (!v && !rs) return;
-    if (v) {
-      (async () => {
-        try {
-          const r = await fetch(`/api/auth/verify-email?token=${encodeURIComponent(v)}`);
-          const d = await r.json().catch(() => ({}));
-          window.history.replaceState({}, "", window.location.pathname + window.location.hash);
-          if (r.ok) {
-            setVerifyBanner("邮箱验证成功，请使用账号密码登录。");
-          } else {
-            setVerifyBanner(
-              d?.error === "invalid_or_expired_token"
-                ? "验证链接无效或已过期，请重新注册。"
-                : "验证失败，请稍后重试。"
-            );
-          }
-        } catch {
-          setVerifyBanner("验证请求失败。");
-        }
-      })();
-    }
-    if (rs) {
-      setResetUrlToken(rs);
-      setAuthMode("reset");
-      window.history.replaceState({}, "", window.location.pathname + window.location.hash);
-    }
+    if (!rs) return;
+    setResetUrlToken(rs);
+    setAuthMode("reset");
+    window.history.replaceState({}, "", window.location.pathname + window.location.hash);
   }, []);
 
   useEffect(() => {
@@ -314,6 +295,43 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [loginCodeCooldown > 0]);
 
+  useEffect(() => {
+    if (registerVerifyCooldown <= 0) return undefined;
+    const id = window.setInterval(() => {
+      setRegisterVerifyCooldown((s) => (s <= 1 ? 0 : s - 1));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [registerVerifyCooldown > 0]);
+
+  async function sendRegisterVerifyCode() {
+    const email = authEmail.trim();
+    if (!email) {
+      setAuthError("请输入注册时使用的邮箱");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const resp = await apiFetch("/api/auth/resend-verification", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ email })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.status === 429) {
+        const wait = Number(data.retryAfterSec) || 60;
+        setRegisterVerifyCooldown(wait);
+        throw new Error(`发送过频，请 ${wait} 秒后再试`);
+      }
+      if (!resp.ok) throw new Error(apiErrorMessage(data, resp.status));
+      setRegisterVerifyCooldown(60);
+    } catch (e) {
+      setAuthError(e?.message || "发送失败");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function sendLoginCode() {
     const email = authEmail.trim();
     if (!email) {
@@ -348,6 +366,44 @@ export default function App() {
     const password = authPassword;
     const email = authEmail.trim();
 
+    if (authMode === "register" && registerDone) {
+      const em = authEmail.trim();
+      const code = registerVerifyOtp.trim();
+      if (!em) {
+        setAuthError("请输入邮箱");
+        return;
+      }
+      if (!/^\d{6}$/.test(code)) {
+        setAuthError("请输入 6 位数字验证码");
+        return;
+      }
+      setAuthBusy(true);
+      setAuthError("");
+      try {
+        const resp = await apiFetch("/api/auth/verify-email-code", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({ email: em, code })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(
+            data?.error === "invalid_or_expired_code" ? "验证码错误或已过期" : apiErrorMessage(data, resp.status)
+          );
+        }
+        setRegisterDone(false);
+        setRegisterVerifyOtp("");
+        setRegisterVerifyCooldown(0);
+        setVerifyBanner("邮箱验证成功，请使用账号密码登录。");
+        setAuthMode("login");
+      } catch (e) {
+        setAuthError(e?.message || "请求失败");
+      } finally {
+        setAuthBusy(false);
+      }
+      return;
+    }
+
     if (authMode === "register") {
       if (!username || !password || !email) {
         setAuthError("请填写用户名、密码与邮箱");
@@ -356,6 +412,7 @@ export default function App() {
       setAuthBusy(true);
       setAuthError("");
       setRegisterDone(false);
+      setRegisterVerifyOtp("");
       try {
         const resp = await apiFetch("/api/auth/register", {
           method: "POST",
@@ -365,6 +422,7 @@ export default function App() {
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(apiErrorMessage(data, resp.status));
         setRegisterDone(true);
+        setRegisterVerifyCooldown(60);
         setAuthPassword("");
       } catch (e) {
         setAuthError(e?.message || "请求失败");
@@ -735,7 +793,7 @@ export default function App() {
         </>
       );
     if (p === "/settings") return <>多智能体 · 个性化与编排说明</>;
-    return <>DeepResearch</>;
+    return <>{APP_DISPLAY_NAME}</>;
   }, [location.pathname, activeChatTitle, ragHeaderTitle]);
 
   if (!authChecked) {
@@ -751,11 +809,11 @@ export default function App() {
     return (
       <div className="app app--center">
         <section className="authCard" aria-label="登录或注册">
-          <div className="authTitle">DeepResearch</div>
+          <div className="authTitle">{APP_DISPLAY_NAME}</div>
           {verifyBanner ? <div className="authInfo">{verifyBanner}</div> : null}
-          {registerDone ? (
+          {registerDone && authMode === "register" ? (
             <div className="authInfo authInfo--ok">
-              注册成功，验证邮件已发送。请登录邮箱点击链接完成验证后再登录。
+              验证码已发送至邮箱（含垃圾箱），30 分钟内有效。未收到可点击「重新发送」。
             </div>
           ) : null}
           {forgotDone ? (
@@ -772,6 +830,8 @@ export default function App() {
                   setAuthMode("login");
                   setAuthError("");
                   setRegisterDone(false);
+                  setRegisterVerifyOtp("");
+                  setRegisterVerifyCooldown(0);
                   setLoginMethod("password");
                   setLoginOtp("");
                 }}
@@ -785,6 +845,8 @@ export default function App() {
                   setAuthMode("register");
                   setAuthError("");
                   setRegisterDone(false);
+                  setRegisterVerifyOtp("");
+                  setRegisterVerifyCooldown(0);
                 }}
               >
                 注册
@@ -826,125 +888,165 @@ export default function App() {
 
           {(authMode === "login" || authMode === "register") && (
             <>
-              {authMode === "login" ? (
-                <div className="authSubTabs" role="tablist" aria-label="登录方式">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={loginMethod === "password"}
-                    className={`authSubTab ${loginMethod === "password" ? "authSubTab--active" : ""}`}
-                    onClick={() => {
-                      setLoginMethod("password");
-                      setAuthError("");
-                      setLoginOtp("");
-                    }}
-                  >
-                    账号密码
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={loginMethod === "code"}
-                    className={`authSubTab ${loginMethod === "code" ? "authSubTab--active" : ""}`}
-                    onClick={() => {
-                      setLoginMethod("code");
-                      setAuthError("");
-                    }}
-                  >
-                    邮箱验证码
-                  </button>
-                </div>
-              ) : null}
-
-              {authMode === "register" ? (
+              {authMode === "register" && registerDone ? (
                 <>
-                  <label className="authLabel">
-                    用户名
-                    <input
-                      className="textInput authInput"
-                      autoComplete="username"
-                      value={authUsername}
-                      onChange={(e) => setAuthUsername(e.target.value)}
-                    />
-                  </label>
-                  <label className="authLabel">
-                    密码
-                    <input
-                      className="textInput authInput"
-                      type="password"
-                      autoComplete="new-password"
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                    />
-                  </label>
                   <label className="authLabel">
                     邮箱
                     <input
                       className="textInput authInput"
                       type="email"
+                      readOnly
                       autoComplete="email"
                       value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
                     />
                   </label>
-                </>
-              ) : loginMethod === "code" ? (
-                <>
                   <label className="authLabel">
-                    邮箱
+                    验证码
                     <div className="authInlineRow">
                       <input
                         className="textInput authInput"
-                        type="email"
-                        autoComplete="email"
-                        value={authEmail}
-                        onChange={(e) => setAuthEmail(e.target.value)}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        placeholder="6 位数字"
+                        value={registerVerifyOtp}
+                        onChange={(e) => setRegisterVerifyOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
                       />
                       <button
                         type="button"
                         className="send authCodeSendBtn"
-                        onClick={sendLoginCode}
-                        disabled={authBusy || loginCodeCooldown > 0}
+                        onClick={sendRegisterVerifyCode}
+                        disabled={authBusy || registerVerifyCooldown > 0}
                       >
-                        {loginCodeCooldown > 0 ? `${loginCodeCooldown}s` : "获取验证码"}
+                        {registerVerifyCooldown > 0 ? `${registerVerifyCooldown}s` : "重新发送"}
                       </button>
                     </div>
-                  </label>
-                  <label className="authLabel">
-                    验证码
-                    <input
-                      className="textInput authInput"
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      maxLength={6}
-                      placeholder="6 位数字"
-                      value={loginOtp}
-                      onChange={(e) => setLoginOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    />
                   </label>
                 </>
               ) : (
                 <>
-                  <label className="authLabel">
-                    用户名
-                    <input
-                      className="textInput authInput"
-                      autoComplete="username"
-                      value={authUsername}
-                      onChange={(e) => setAuthUsername(e.target.value)}
-                    />
-                  </label>
-                  <label className="authLabel">
-                    密码
-                    <input
-                      className="textInput authInput"
-                      type="password"
-                      autoComplete="current-password"
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                    />
-                  </label>
+                  {authMode === "login" ? (
+                    <div className="authSubTabs" role="tablist" aria-label="登录方式">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={loginMethod === "password"}
+                        className={`authSubTab ${loginMethod === "password" ? "authSubTab--active" : ""}`}
+                        onClick={() => {
+                          setLoginMethod("password");
+                          setAuthError("");
+                          setLoginOtp("");
+                        }}
+                      >
+                        账号密码
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={loginMethod === "code"}
+                        className={`authSubTab ${loginMethod === "code" ? "authSubTab--active" : ""}`}
+                        onClick={() => {
+                          setLoginMethod("code");
+                          setAuthError("");
+                        }}
+                      >
+                        邮箱验证码
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {authMode === "register" ? (
+                    <>
+                      <label className="authLabel">
+                        用户名
+                        <input
+                          className="textInput authInput"
+                          autoComplete="username"
+                          value={authUsername}
+                          onChange={(e) => setAuthUsername(e.target.value)}
+                        />
+                      </label>
+                      <label className="authLabel">
+                        密码
+                        <input
+                          className="textInput authInput"
+                          type="password"
+                          autoComplete="new-password"
+                          value={authPassword}
+                          onChange={(e) => setAuthPassword(e.target.value)}
+                        />
+                      </label>
+                      <label className="authLabel">
+                        邮箱
+                        <input
+                          className="textInput authInput"
+                          type="email"
+                          autoComplete="email"
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
+                        />
+                      </label>
+                    </>
+                  ) : loginMethod === "code" ? (
+                    <>
+                      <label className="authLabel">
+                        邮箱
+                        <div className="authInlineRow">
+                          <input
+                            className="textInput authInput"
+                            type="email"
+                            autoComplete="email"
+                            value={authEmail}
+                            onChange={(e) => setAuthEmail(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="send authCodeSendBtn"
+                            onClick={sendLoginCode}
+                            disabled={authBusy || loginCodeCooldown > 0}
+                          >
+                            {loginCodeCooldown > 0 ? `${loginCodeCooldown}s` : "获取验证码"}
+                          </button>
+                        </div>
+                      </label>
+                      <label className="authLabel">
+                        验证码
+                        <input
+                          className="textInput authInput"
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          maxLength={6}
+                          placeholder="6 位数字"
+                          value={loginOtp}
+                          onChange={(e) => setLoginOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <label className="authLabel">
+                        用户名
+                        <input
+                          className="textInput authInput"
+                          autoComplete="username"
+                          value={authUsername}
+                          onChange={(e) => setAuthUsername(e.target.value)}
+                        />
+                      </label>
+                      <label className="authLabel">
+                        密码
+                        <input
+                          className="textInput authInput"
+                          type="password"
+                          autoComplete="current-password"
+                          value={authPassword}
+                          onChange={(e) => setAuthPassword(e.target.value)}
+                        />
+                      </label>
+                    </>
+                  )}
                 </>
               )}
             </>
@@ -985,17 +1087,19 @@ export default function App() {
             <button className="send authSubmit" type="button" onClick={submitAuth} disabled={authBusy}>
               {authBusy
                 ? "处理中…"
-                : authMode === "register"
-                  ? "注册"
-                  : authMode === "forgot"
-                    ? "发送重置邮件"
-                    : authMode === "reset"
-                      ? "确认新密码"
-                      : "登录"}
+                : authMode === "register" && registerDone
+                  ? "完成验证"
+                  : authMode === "register"
+                    ? "注册"
+                    : authMode === "forgot"
+                      ? "发送重置邮件"
+                      : authMode === "reset"
+                        ? "确认新密码"
+                        : "登录"}
             </button>
           )}
           <p className="authNote">
-            注册需验证邮箱；密码与用户信息存于服务端。生产环境请配置 HTTPS 与更安全的密码存储。
+            注册需验证邮箱（6 位验证码）；密码与用户信息存于服务端。生产环境请配置 HTTPS 与更安全的密码存储。
           </p>
         </section>
       </div>

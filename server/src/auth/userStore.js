@@ -2,6 +2,8 @@ import fs from "fs";
 import crypto from "node:crypto";
 
 const LOGIN_OTP_TTL_MS = 10 * 60 * 1000;
+/** 注册邮箱验证码有效期（与邮件说明一致） */
+const REGISTER_OTP_TTL_MS = 30 * 60 * 1000;
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -78,21 +80,23 @@ export class UserStore {
       }
     }
 
-    const verifyToken = randomToken();
-    const verifyExpires = Date.now() + 24 * 60 * 60 * 1000;
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+    const registerOtpExpires = Date.now() + REGISTER_OTP_TTL_MS;
 
     data.users[name] = {
       password: pass,
       email: emailNorm,
       emailVerified: false,
-      verifyToken,
-      verifyExpires,
+      registerOtpCode: code,
+      registerOtpExpires,
+      verifyToken: null,
+      verifyExpires: null,
       resetToken: null,
       resetExpires: null,
       createdAt: Date.now()
     };
     save(data);
-    return { ok: true, email: emailNorm, verifyToken };
+    return { ok: true, email: emailNorm, code };
   }
 
   validateLogin({ username, password }) {
@@ -106,22 +110,37 @@ export class UserStore {
     return { ok: true, username: name };
   }
 
-  verifyEmailToken(token) {
-    const t = String(token || "").trim();
-    if (!t) return { ok: false, error: "token is required" };
+  /**
+   * 使用邮箱 + 6 位验证码完成注册后的邮箱验证。
+   */
+  verifyRegistrationOtp(email, code) {
+    const emailNorm = normalizeEmail(email);
+    const c = String(code ?? "").trim();
+    if (!emailNorm || !isValidEmail(emailNorm)) return { ok: false, error: "invalid input" };
+    if (!/^\d{6}$/.test(c)) return { ok: false, error: "invalid_or_expired_code" };
     const data = load();
     const now = Date.now();
     for (const name of Object.keys(data.users)) {
       const u = data.users[name];
-      if (u.verifyToken === t && typeof u.verifyExpires === "number" && u.verifyExpires > now) {
+      if (!u?.email || normalizeEmail(u.email) !== emailNorm) continue;
+      if (u.emailVerified) return { ok: false, error: "invalid_or_expired_code" };
+      if (
+        u.registerOtpCode &&
+        u.registerOtpCode === c &&
+        typeof u.registerOtpExpires === "number" &&
+        u.registerOtpExpires > now
+      ) {
         u.emailVerified = true;
+        u.registerOtpCode = null;
+        u.registerOtpExpires = null;
         u.verifyToken = null;
         u.verifyExpires = null;
         save(data);
         return { ok: true, username: name };
       }
+      return { ok: false, error: "invalid_or_expired_code" };
     }
-    return { ok: false, error: "invalid_or_expired_token" };
+    return { ok: false, error: "invalid_or_expired_code" };
   }
 
   requestPasswordReset(email) {
@@ -224,12 +243,13 @@ export class UserStore {
       const u = data.users[name];
       if (u?.email && normalizeEmail(u.email) === emailNorm) {
         if (u.emailVerified) return { ok: false, error: "already_verified" };
-        const verifyToken = randomToken();
-        const verifyExpires = Date.now() + 24 * 60 * 60 * 1000;
-        u.verifyToken = verifyToken;
-        u.verifyExpires = verifyExpires;
+        const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+        u.registerOtpCode = code;
+        u.registerOtpExpires = Date.now() + REGISTER_OTP_TTL_MS;
+        u.verifyToken = null;
+        u.verifyExpires = null;
         save(data);
-        return { ok: true, email: emailNorm, verifyToken };
+        return { ok: true, email: emailNorm, code };
       }
     }
     return { ok: false, error: "email_not_found" };

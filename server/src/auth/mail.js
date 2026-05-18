@@ -52,18 +52,19 @@ function createTransport() {
   });
 }
 
-export async function sendVerificationEmail(to, token) {
+/** 注册后邮箱验证：发送 6 位数字验证码（非链接） */
+export async function sendRegistrationVerifyCodeEmail(to, code) {
   const transport = createTransport();
   if (!transport) throw new Error("SMTP not configured");
-  const link = `${getPublicBase()}/?verify=${encodeURIComponent(token)}`;
   const fromAddr = process.env.SMTP_USER?.trim();
-  const from = process.env.SMTP_FROM || `DeepResearch <${fromAddr}>`;
+  const from = process.env.SMTP_FROM || `NAME <${fromAddr}>`;
+  const c = String(code || "").trim();
   await transport.sendMail({
     from,
     to,
-    subject: "【DeepResearch】请验证您的邮箱",
-    text: `请复制到浏览器打开（24 小时内有效）：\n${link}\n\n如非本人注册请忽略。`,
-    html: `<p>请点击链接完成邮箱验证（24 小时内有效）：</p><p><a href="${link}">${link}</a></p><p>如非本人注册请忽略。</p>`
+    subject: "【NAME】注册邮箱验证码",
+    text: `您的注册验证码为：${c}\n30 分钟内有效。如非本人注册请忽略。`,
+    html: `<p>您的注册验证码为：</p><p style="font-size:22px;font-weight:700;letter-spacing:4px;">${c}</p><p>30 分钟内有效。如非本人注册请忽略。</p>`
   });
 }
 
@@ -71,12 +72,12 @@ export async function sendLoginCodeEmail(to, code) {
   const transport = createTransport();
   if (!transport) throw new Error("SMTP not configured");
   const fromAddr = process.env.SMTP_USER?.trim();
-  const from = process.env.SMTP_FROM || `DeepResearch <${fromAddr}>`;
+  const from = process.env.SMTP_FROM || `NAME <${fromAddr}>`;
   const c = String(code || "").trim();
   await transport.sendMail({
     from,
     to,
-    subject: "【DeepResearch】登录验证码",
+    subject: "【NAME】登录验证码",
     text: `您的登录验证码为：${c}\n10 分钟内有效。如非本人操作请忽略。`,
     html: `<p>您的登录验证码为：</p><p style="font-size:22px;font-weight:700;letter-spacing:4px;">${c}</p><p>10 分钟内有效。如非本人操作请忽略。</p>`
   });
@@ -87,11 +88,11 @@ export async function sendPasswordResetEmail(to, token) {
   if (!transport) throw new Error("SMTP not configured");
   const link = `${getPublicBase()}/?reset=${encodeURIComponent(token)}`;
   const fromAddr = process.env.SMTP_USER?.trim();
-  const from = process.env.SMTP_FROM || `DeepResearch <${fromAddr}>`;
+  const from = process.env.SMTP_FROM || `NAME <${fromAddr}>`;
   await transport.sendMail({
     from,
     to,
-    subject: "【DeepResearch】重置密码",
+    subject: "【NAME】重置密码",
     text: `请复制到浏览器打开（1 小时内有效）：\n${link}\n\n如非本人操作请忽略。`,
     html: `<p>请点击链接重置密码（1 小时内有效）：</p><p><a href="${link}">${link}</a></p><p>如非本人操作请忽略。</p>`
   });
